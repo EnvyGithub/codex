@@ -33,6 +33,8 @@ use codex_app_server_protocol::AuthMode;
 use codex_backend_client::Client as BackendClient;
 use codex_core::config::Config;
 use codex_core::config::ConstraintResult;
+use codex_core::config::types::AgentReasoningTranslationConfig;
+use codex_core::config::types::DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS;
 use codex_core::config::types::Notifications;
 use codex_core::features::FEATURES;
 use codex_core::features::Feature;
@@ -393,11 +395,12 @@ pub(crate) enum ExternalEditorState {
 /// 推理（AgentReasoning）正文翻译的 UI 对齐等待时间上限（默认 5 秒）。
 ///
 /// 说明：
-/// - 方案 A：为了保证“译文紧跟在原文下面”，在译文生成完成（或超时）前，
-///   会短暂缓冲后续的历史输出，避免其它块插入导致错位。
+/// - 方案 A：为了保证“译文紧跟在原文下面”，在译文生成完成（或超时）前，会短暂缓冲后续的历史输出，
+///   避免其它块插入导致错位。
 /// - 该等待仅影响“历史输出的落盘顺序”，不会阻塞 agent 本身继续运行。
-const DEFAULT_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS: u64 = 5_000;
-
+/// - 默认值来自配置：`translation.agent_reasoning.ui_max_wait_ms`（未配置则回退到内置默认值）。
+/// - 环境变量可覆盖：见 [`AGENT_REASONING_TRANSLATION_MAX_WAIT_ENV`]。
+///
 /// 覆盖推理译文对齐等待上限的环境变量（单位：毫秒）。
 ///
 /// 示例：`CODEX_TUI_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS=5000`
@@ -2938,18 +2941,26 @@ impl ChatWidget {
         }
     }
 
-    fn agent_reasoning_translation_max_wait() -> Duration {
+    fn agent_reasoning_translation_max_wait(
+        config: Option<&AgentReasoningTranslationConfig>,
+    ) -> Duration {
+        let config_max_wait = config.map(|cfg| cfg.ui_max_wait).unwrap_or_else(|| {
+            Duration::from_millis(DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS)
+        });
+
         match std::env::var(AGENT_REASONING_TRANSLATION_MAX_WAIT_ENV) {
             Ok(raw) => match raw.trim().parse::<u64>() {
                 Ok(ms) => Duration::from_millis(ms),
                 Err(err) => {
                     tracing::warn!(
-                        "无法解析环境变量 {AGENT_REASONING_TRANSLATION_MAX_WAIT_ENV}={raw:?}：{err}；将使用默认值 {DEFAULT_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS}ms"
+                        "无法解析环境变量 {AGENT_REASONING_TRANSLATION_MAX_WAIT_ENV}={raw:?}：{err}；将使用配置值 {}ms（未配置则默认 {}ms）",
+                        config_max_wait.as_millis(),
+                        DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS
                     );
-                    Duration::from_millis(DEFAULT_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS)
+                    config_max_wait
                 }
             },
-            Err(_) => Duration::from_millis(DEFAULT_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS),
+            Err(_) => config_max_wait,
         }
     }
 
@@ -2965,7 +2976,9 @@ impl ChatWidget {
         let request_id = self.agent_reasoning_body_translation_seq;
         self.agent_reasoning_body_translation_seq =
             self.agent_reasoning_body_translation_seq.saturating_add(1);
-        let max_wait = Self::agent_reasoning_translation_max_wait();
+        let max_wait = Self::agent_reasoning_translation_max_wait(
+            self.config.agent_reasoning_translation.as_ref(),
+        );
         let deadline = Instant::now()
             .checked_add(max_wait)
             .unwrap_or_else(Instant::now);

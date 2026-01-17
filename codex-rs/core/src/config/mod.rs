@@ -3,6 +3,7 @@ use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
 use crate::config::types::AgentReasoningTranslationConfig;
 use crate::config::types::DEFAULT_AGENT_REASONING_TRANSLATION_TIMEOUT_MS;
+use crate::config::types::DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS;
 use crate::config::types::DEFAULT_OTEL_ENVIRONMENT;
 use crate::config::types::History;
 use crate::config::types::McpServerConfig;
@@ -1468,10 +1469,16 @@ impl Config {
                 .or_else(|| global.and_then(|settings| settings.timeout_ms))
                 .unwrap_or(DEFAULT_AGENT_REASONING_TRANSLATION_TIMEOUT_MS);
 
+            let ui_max_wait_ms = profile
+                .and_then(|settings| settings.ui_max_wait_ms)
+                .or_else(|| global.and_then(|settings| settings.ui_max_wait_ms))
+                .unwrap_or(DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS);
+
             match command {
                 Some(command) if !command.is_empty() => Some(AgentReasoningTranslationConfig {
                     command,
                     timeout: std::time::Duration::from_millis(timeout_ms),
+                    ui_max_wait: std::time::Duration::from_millis(ui_max_wait_ms),
                 }),
                 _ => None,
             }
@@ -1903,6 +1910,7 @@ persistence = "none"
 [translation.agent_reasoning]
 command = ["python3", "/tmp/translate.py"]
 timeout_ms = 1234
+ui_max_wait_ms = 5678
 "#;
         let cfg: ConfigToml = toml::from_str(toml).expect("TOML deserialization should succeed");
 
@@ -1926,6 +1934,7 @@ timeout_ms = 1234
             Some(AgentReasoningTranslationConfig {
                 command: vec!["python3".to_string(), "/tmp/translate.py".to_string()],
                 timeout: Duration::from_millis(1234),
+                ui_max_wait: Duration::from_millis(5678),
             })
         );
         Ok(())
