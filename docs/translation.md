@@ -121,7 +121,26 @@ Codex 会把翻译请求以 **JSON** 写入翻译器的 `stdin`，翻译器需�
 
 - `scripts/translate_agent_reasoning_openai_compatible.py`
 
-使用前请配置环境变量（避免把密钥写入脚本）：
+使用前请配置环境变量（避免把密钥写入脚本）。为减少每次启动终端手动 `export` 的成本，
+示例脚本会尝试读取 env 文件并加载其中的 `KEY=VALUE`：
+
+> env 文件路径：`$CODEX_TRANSLATION_ENV_FILE`（若设置） > `~/.codex/translation.env`（默认）  
+> 值优先级：**进程环境变量** > env 文件（仅当当前进程未设置同名 env 时才从文件注入）。
+
+示例（`~/.codex/translation.env`）：
+
+```bash
+# OpenAI 兼容
+CODEX_TRANSLATION_BASE_URL=https://api.openai.com/v1
+CODEX_TRANSLATION_API_KEY=<your_api_key>
+CODEX_TRANSLATION_MODEL=gpt-4.1-mini
+
+# Gemini（可选）
+CODEX_GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta
+CODEX_GEMINI_API_KEY=<your_api_key>
+CODEX_GEMINI_MODEL=gemini-3-flash
+CODEX_GEMINI_MAX_OUTPUT_TOKENS=4096
+```
 
 - `CODEX_TRANSLATION_BASE_URL`（可选，默认使用 `$OPENAI_BASE_URL` 或 `https://api.openai.com/v1`）
 - `CODEX_TRANSLATION_API_KEY`（或直接复用 `$OPENAI_API_KEY`）
@@ -135,7 +154,11 @@ Codex 会把翻译请求以 **JSON** 写入翻译器的 `stdin`，翻译器需�
 
 - `scripts/translate_agent_reasoning_gemini.py`
 
-使用前请配置环境变量：
+使用前请配置环境变量。为减少每次启动终端手动 `export` 的成本，
+示例脚本会尝试读取 env 文件并加载其中的 `KEY=VALUE`：
+
+> env 文件路径：`$CODEX_TRANSLATION_ENV_FILE`（若设置） > `~/.codex/translation.env`（默认）  
+> 值优先级：**进程环境变量** > env 文件（仅当当前进程未设置同名 env 时才从文件注入）。
 
 - `CODEX_GEMINI_BASE_URL`（可选，默认 `https://generativelanguage.googleapis.com/v1beta`）
 - `CODEX_GEMINI_API_KEY`
@@ -151,15 +174,15 @@ Codex 会把翻译请求以 **JSON** 写入翻译器的 `stdin`，翻译器需�
 如果你的 Gemini 服务是通过代理网关暴露的（例如你给出的 URL 形如：
 `https://<host>/gemini/v1beta/models/<model>:generateContent`），推荐的配置方式是：
 
-1. **把 Base URL 与模型写在 env 文件里**（避免每次手敲；同时不要把 key 提交到 git）  
-   参考：`scripts/gemini_crs1.env.example`
+1. **把 Base URL / 模型 / API Key 写入私有 env 文件**（避免每次手敲；同时不要把 key 提交到 git）  
+   推荐放在：`~/.codex/translation.env`（示例脚本会自动读取），或通过 `CODEX_TRANSLATION_ENV_FILE` 指定路径  
+   参考：`scripts/gemini_crs1.env.example`（可直接复制并按需改名/路径）
 
-2. 在启动 Codex 前加载环境变量（只对当前终端会话生效）：
+2. （可选）确保文件权限仅当前用户可读：
 
    ```bash
-   set -a
-   source /path/to/your_private_gemini.env
-   set +a
+   chmod 700 ~/.codex
+   chmod 600 ~/.codex/translation.env
    ```
 
 3. 确保你设置的是：

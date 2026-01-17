@@ -6,7 +6,7 @@ Google Gemini 翻译器示例（用于 Codex “推理输出翻译插件”）�
 
 特点：
 - 不依赖第三方包（仅标准库）。
-- 通过环境变量配置 base_url / api_key / model。
+- 通过环境变量配置 base_url / api_key / model（也支持从 env 文件读取：`$CODEX_TRANSLATION_ENV_FILE` 或默认 `~/.codex/translation.env`）。
 - 从 stdin 读取 JSON 请求，向 stdout 输出 JSON 响应（协议见 docs/translation.md）。
 
 使用方式（示例）：
@@ -37,6 +37,63 @@ import urllib.request
 
 
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
+DEFAULT_ENV_FILE = os.path.expanduser("~/.codex/translation.env")
+ENV_FILE_OVERRIDE_ENV = "CODEX_TRANSLATION_ENV_FILE"
+
+
+def _env_file_path() -> str:
+    override = os.environ.get(ENV_FILE_OVERRIDE_ENV, "").strip()
+    if override:
+        return os.path.expanduser(override)
+    return DEFAULT_ENV_FILE
+
+
+def _maybe_load_env_file(path: str) -> None:
+    """
+    从 `KEY=VALUE` 文本文件加载环境变量（仅当当前进程未设置同名 env 时才写入）。
+
+    设计目标：
+    - 让翻译脚本在被 Codex 作为外部命令调用时也能自动拿到 KEY/URL 等配置；
+    - 避免用户每次打开终端都手动 export；
+    - 环境变量仍可覆盖文件（优先级：进程 env > 文件）。
+
+    文件格式（最小约定）：
+    - 允许空行与以 `#` 开头的注释
+    - 允许 `export KEY=VALUE`
+    - 值可用单/双引号包裹（仅去掉首尾同类引号，不做复杂转义）
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = list(f)
+    except FileNotFoundError:
+        return
+    except Exception as e:  # noqa: BLE001 - 示例脚本直接返回可读错误
+        sys.stderr.write(f"cannot_read_translation_env:{path}:{e}\n")
+        return
+
+    for line_no, raw in enumerate(lines, start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            sys.stderr.write(f"invalid_translation_env_line:{path}:{line_no}:{raw.strip()}\n")
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            sys.stderr.write(f"invalid_translation_env_key:{path}:{line_no}\n")
+            continue
+
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+
+        if key not in os.environ:
+            os.environ[key] = value
 
 
 def _get_env(name: str) -> str | None:
@@ -168,6 +225,7 @@ def _call_generate_content(
 
 
 def main() -> int:
+    _maybe_load_env_file(_env_file_path())
     try:
         req = json.load(sys.stdin)
     except Exception as e:  # noqa: BLE001
