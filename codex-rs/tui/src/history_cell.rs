@@ -376,21 +376,6 @@ impl AgentReasoningTranslationCell {
     }
 
     fn lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut out: Vec<Line<'static>> = Vec::new();
-
-        let mut header: Vec<Span<'static>> = Vec::new();
-        header.push("  └ ".dim());
-        if self.is_error {
-            header.push("译文生成失败".red().bold());
-        } else if let Some(title) = &self.title {
-            // 注意：原文推理历史默认不显示首个粗体标题（仅用于状态栏），
-            // 为避免“译文块比原文多一行标题”造成困惑，这里也不强制输出标题。
-            header.push(title.clone().bold().dim());
-        } else {
-            header.push("译文".bold().dim());
-        }
-        out.push(Line::from(header));
-
         let mut md_lines: Vec<Line<'static>> = Vec::new();
         append_markdown(
             &self.content,
@@ -411,14 +396,33 @@ impl AgentReasoningTranslationCell {
             })
             .collect::<Vec<_>>();
 
-        out.extend(word_wrap_lines(
+        if self.is_error {
+            let mut out: Vec<Line<'static>> = Vec::new();
+            let mut header: Vec<Span<'static>> = Vec::new();
+            header.push("  └ ".dim());
+            header.push("译文生成失败".red().bold());
+            if let Some(title) = &self.title {
+                header.push(" ".into());
+                header.push(format!("({title})").dim());
+            }
+            out.push(Line::from(header));
+            out.extend(word_wrap_lines(
+                &styled_md_lines,
+                RtOptions::new(width as usize)
+                    .initial_indent("    ".into())
+                    .subsequent_indent("    ".into()),
+            ));
+            return out;
+        }
+
+        // 选项 B：成功时不额外显示 “└ 译文” 标题行，
+        // 直接把译文正文作为子节点输出，避免比原文多一行“标签”。
+        word_wrap_lines(
             &styled_md_lines,
             RtOptions::new(width as usize)
-                .initial_indent("    ".into())
+                .initial_indent("  └ ".dim().into())
                 .subsequent_indent("    ".into()),
-        ));
-
-        out
+        )
     }
 }
 
