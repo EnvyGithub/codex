@@ -2503,11 +2503,12 @@ impl ChatComposer {
     fn footer_props(&self) -> FooterProps {
         let mode = self.footer_mode();
         let is_wsl = {
-            #[cfg(target_os = "linux")]
+            // 快照测试需要跨环境稳定；测试中禁用 WSL 检测，避免渲染出的快捷键提示依赖 /proc/version。
+            #[cfg(all(target_os = "linux", not(test)))]
             {
                 mode == FooterMode::ShortcutOverlay && crate::clipboard_paste::is_probably_wsl()
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(any(not(target_os = "linux"), test))]
             {
                 false
             }

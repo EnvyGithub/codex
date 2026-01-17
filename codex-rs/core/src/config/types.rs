@@ -315,6 +315,52 @@ pub enum HistoryPersistence {
     None,
 }
 
+// ===== 翻译配置 =====
+
+/// 翻译相关配置（外部命令插件）。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct TranslationToml {
+    /// `AgentReasoning`（推理）翻译配置。
+    pub agent_reasoning: Option<AgentReasoningTranslationToml>,
+}
+
+/// `AgentReasoning`（推理）翻译配置：通过外部命令将推理英文内容翻译成中文。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct AgentReasoningTranslationToml {
+    /// 外部翻译器命令（argv）。
+    ///
+    /// - 未设置：翻译功能关闭（保持现有行为）
+    /// - 空数组：显式关闭（用于 profile 覆盖全局配置）
+    pub command: Option<Vec<String>>,
+
+    /// 翻译器调用超时（毫秒）。
+    ///
+    /// 未设置时使用默认值（见 [`DEFAULT_AGENT_REASONING_TRANSLATION_TIMEOUT_MS`]）。
+    pub timeout_ms: Option<u64>,
+
+    /// UI 对齐等待上限（毫秒）。
+    ///
+    /// 说明：
+    /// - 该值仅影响 TUI/TUI2 的“译文紧跟原文”对齐策略（barrier）等待多久；
+    /// - 不影响外部翻译器进程本身的执行超时（见 [`Self::timeout_ms`]）；
+    /// - 未设置时使用默认值（见 [`DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS`]）。
+    pub ui_max_wait_ms: Option<u64>,
+}
+
+/// 翻译器默认超时（毫秒）。用于避免外部命令卡死拖慢 UI/输出。
+pub const DEFAULT_AGENT_REASONING_TRANSLATION_TIMEOUT_MS: u64 = 2_000;
+
+/// UI 对齐等待上限默认值（毫秒）。用于避免对齐策略长时间缓冲造成“看起来卡住”。
+pub const DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS: u64 = 5_000;
+
+/// 运行时使用的推理翻译配置（已完成默认值与单位转换）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentReasoningTranslationConfig {
+    pub command: Vec<String>,
+    pub timeout: Duration,
+    pub ui_max_wait: Duration,
+}
+
 // ===== Analytics configuration =====
 
 /// Analytics settings loaded from config.toml. Fields are optional so we can apply defaults.

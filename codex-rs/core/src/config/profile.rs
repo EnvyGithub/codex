@@ -40,6 +40,8 @@ pub struct ConfigProfile {
     pub tools_view_image: Option<bool>,
     pub web_search: Option<WebSearchMode>,
     pub analytics: Option<crate::config::types::AnalyticsConfigToml>,
+    /// 翻译相关配置（可在 profile 内覆盖全局配置）。
+    pub translation: Option<crate::config::types::TranslationToml>,
     /// Optional feature toggles scoped to this profile.
     #[serde(default)]
     // Injects known feature keys into the schema and forbids unknown keys.

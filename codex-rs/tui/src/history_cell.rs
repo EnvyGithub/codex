@@ -293,6 +293,16 @@ impl ReasoningSummaryCell {
         }
     }
 
+    pub(crate) fn full_markdown_for_translation(&self) -> Option<String> {
+        if self.transcript_only {
+            return None;
+        }
+        if self._header.trim().is_empty() {
+            return None;
+        }
+        Some(format!("{}{}", self._header, self.content))
+    }
+
     fn lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
         append_markdown(
@@ -337,6 +347,95 @@ impl HistoryCell for ReasoningSummaryCell {
         } else {
             self.lines(width).len() as u16
         }
+    }
+
+    fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.lines(width)
+    }
+
+    fn desired_transcript_height(&self, width: u16) -> u16 {
+        self.lines(width).len() as u16
+    }
+}
+
+/// 推理（AgentReasoning）译文块。
+///
+/// 说明：
+/// - 译文由后台任务生成；UI 收到后以独立块展示（不影响主流程）。
+#[derive(Debug)]
+pub(crate) struct AgentReasoningTranslationCell {
+    title: Option<String>,
+    content: String,
+    is_error: bool,
+}
+
+impl AgentReasoningTranslationCell {
+    pub(crate) fn new(title: Option<String>, content: String, is_error: bool) -> Self {
+        Self {
+            title,
+            content,
+            is_error,
+        }
+    }
+
+    fn lines(&self, width: u16) -> Vec<Line<'static>> {
+        let mut md_lines: Vec<Line<'static>> = Vec::new();
+        append_markdown(
+            &self.content,
+            Some((width as usize).saturating_sub(4).max(1)),
+            &mut md_lines,
+        );
+
+        let translation_style = Style::default().dim();
+        let styled_md_lines = md_lines
+            .into_iter()
+            .map(|mut line| {
+                line.spans = line
+                    .spans
+                    .into_iter()
+                    .map(|span| span.patch_style(translation_style))
+                    .collect();
+                line
+            })
+            .collect::<Vec<_>>();
+
+        if self.is_error {
+            let mut out: Vec<Line<'static>> = Vec::new();
+            let mut header: Vec<Span<'static>> = Vec::new();
+            header.push("  └ ".dim());
+            header.push("译文生成失败".red().bold());
+            if let Some(title) = &self.title {
+                header.push(" ".into());
+                header.push(format!("({title})").dim());
+            }
+            out.push(Line::from(header));
+            out.extend(word_wrap_lines(
+                &styled_md_lines,
+                RtOptions::new(width as usize)
+                    .initial_indent("    ".into())
+                    .subsequent_indent("    ".into()),
+            ));
+            return out;
+        }
+
+        // 选项 B：成功时不额外显示 “└ 译文” 标题行，
+        // 直接把译文正文作为子节点输出，避免比原文多一行“标签”。
+        word_wrap_lines(
+            &styled_md_lines,
+            RtOptions::new(width as usize)
+                .initial_indent("  └ ".dim().into())
+                .subsequent_indent("    ".into()),
+        )
+    }
+}
+
+impl HistoryCell for AgentReasoningTranslationCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.lines(width)
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        self.lines(width).len() as u16
     }
 
     fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
@@ -2116,6 +2215,24 @@ pub(crate) fn new_reasoning_summary_block(full_reasoning_buffer: String) -> Box<
     Box::new(ReasoningSummaryCell::new(
         "".to_string(),
         full_reasoning_buffer.to_string(),
+        true,
+    ))
+}
+
+pub(crate) fn new_agent_reasoning_translation_block(
+    title: Option<String>,
+    translated: String,
+) -> Box<dyn HistoryCell> {
+    Box::new(AgentReasoningTranslationCell::new(title, translated, false))
+}
+
+pub(crate) fn new_agent_reasoning_translation_error_block(
+    title: Option<String>,
+    reason: String,
+) -> Box<dyn HistoryCell> {
+    Box::new(AgentReasoningTranslationCell::new(
+        title,
+        format!("译文生成失败：{reason}"),
         true,
     ))
 }
