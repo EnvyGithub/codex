@@ -823,6 +823,11 @@ async fn make_chatwidget_manual(
         interrupts: InterruptManager::new(),
         reasoning_buffer: String::new(),
         full_reasoning_buffer: String::new(),
+        agent_reasoning_title_translation_cache: HashMap::new(),
+        current_reasoning_title_raw: None,
+        agent_reasoning_body_translation_barrier: None,
+        deferred_history_cells: VecDeque::new(),
+        agent_reasoning_body_translation_seq: 0,
         current_status_header: String::from("Working"),
         retry_status_header: None,
         thread_id: None,
@@ -4926,4 +4931,320 @@ async fn review_queues_user_messages_snapshot() {
     })
     .unwrap();
     assert_snapshot!(term.backend().vt100().screen().contents());
+}
+
+#[test]
+fn extract_first_bold_handles_incomplete_and_trim() {
+    assert_eq!(extract_first_bold("no bold"), None);
+    assert_eq!(extract_first_bold("**Thinking"), None);
+    assert_eq!(extract_first_bold("****"), None);
+    assert_eq!(
+        extract_first_bold("** Thinking ** then"),
+        Some("Thinking".to_string())
+    );
+    assert_eq!(
+        extract_first_bold("prefix **Thinking** suffix"),
+        Some("Thinking".to_string())
+    );
+}
+
+#[tokio::test]
+async fn reasoning_body_translation_barrier_keeps_translation_adjacent() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+
+    // 先插入“原文推理摘要”块（对应真实运行时的 on_agent_reasoning_final）。
+    let full_reasoning = "**Thinking**\n\nI will first analyze the request.".to_string();
+    chat.add_boxed_history(history_cell::new_reasoning_summary_block(full_reasoning));
+
+    // 开启 barrier：在译文生成完成前，缓冲后续历史输出。
+    let request_id = chat
+        .begin_agent_reasoning_body_translation_barrier(thread_id, Some("Thinking".to_string()))
+        .expect("expected barrier to start");
+
+    // 这条输出若不缓冲，会插入到译文之前导致错位。
+    chat.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+        ratatui::text::Line::from("AFTER_CELL"),
+    ]));
+
+    // 模拟译文返回（不依赖真实外部翻译器）。
+    chat.on_agent_reasoning_body_translated(
+        request_id,
+        thread_id,
+        Some("Thinking".to_string()),
+        Some("**思考中**\n\n这里是译文。".to_string()),
+        None,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let combined: Vec<String> = cells
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect();
+
+    assert!(
+        combined
+            .first()
+            .is_some_and(|s| s.contains("I will first analyze")),
+        "missing reasoning block in first cell: {combined:?}"
+    );
+    assert!(
+        combined
+            .get(1)
+            .is_some_and(|s| s.contains("译文") && s.contains("这里是译文")),
+        "expected translation cell immediately after reasoning: {combined:?}"
+    );
+    assert!(
+        combined.get(2).is_some_and(|s| s.contains("AFTER_CELL")),
+        "expected buffered cell to flush after translation: {combined:?}"
+    );
+}
+
+#[tokio::test]
+async fn reasoning_body_translation_barrier_times_out_and_flushes_buffer() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+
+    let full_reasoning = "**Thinking**\n\nI will first analyze the request.".to_string();
+    chat.add_boxed_history(history_cell::new_reasoning_summary_block(full_reasoning));
+
+    let _request_id = chat
+        .begin_agent_reasoning_body_translation_barrier(thread_id, Some("Thinking".to_string()))
+        .expect("expected barrier to start");
+
+    chat.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+        ratatui::text::Line::from("AFTER_CELL"),
+    ]));
+
+    // 人为把 deadline 设到过去，触发一次超时释放。
+    if let Some(barrier) = chat.agent_reasoning_body_translation_barrier.as_mut() {
+        barrier.deadline = std::time::Instant::now() - std::time::Duration::from_millis(1);
+    }
+    chat.maybe_flush_agent_reasoning_body_translation_barrier_timeout();
+
+    let cells = drain_insert_history(&mut rx);
+    let combined: Vec<String> = cells
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect();
+
+    assert!(
+        combined
+            .get(1)
+            .is_some_and(|s| s.contains("译文生成失败") && s.contains("等待超时")),
+        "expected timeout error cell after reasoning: {combined:?}"
+    );
+    assert!(
+        combined.get(2).is_some_and(|s| s.contains("AFTER_CELL")),
+        "expected buffered cell to flush after timeout: {combined:?}"
+    );
+}
+
+#[tokio::test]
+async fn reasoning_body_translation_ignores_late_results_from_previous_barrier() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+
+    chat.add_boxed_history(history_cell::new_reasoning_summary_block(
+        "**Thinking**\n\nFirst reasoning.".to_string(),
+    ));
+
+    let request_id_1 = chat
+        .begin_agent_reasoning_body_translation_barrier(thread_id, Some("Thinking".to_string()))
+        .expect("expected barrier to start");
+
+    // 超时释放 barrier 1（模拟翻译器卡住/很慢，译文晚到）。
+    if let Some(barrier) = chat.agent_reasoning_body_translation_barrier.as_mut() {
+        barrier.deadline = std::time::Instant::now() - std::time::Duration::from_millis(1);
+    }
+    chat.maybe_flush_agent_reasoning_body_translation_barrier_timeout();
+
+    let request_id_2 = chat
+        .begin_agent_reasoning_body_translation_barrier(thread_id, Some("Thinking".to_string()))
+        .expect("expected barrier to start");
+
+    // 旧译文晚到：不应当打断当前 barrier，也不应插入到历史中。
+    chat.on_agent_reasoning_body_translated(
+        request_id_1,
+        thread_id,
+        Some("Thinking".to_string()),
+        Some("**旧**\n\n旧译文".to_string()),
+        None,
+    );
+    assert!(
+        chat.agent_reasoning_body_translation_barrier
+            .as_ref()
+            .is_some_and(|b| b.request_id == request_id_2),
+        "late result should not affect the current barrier"
+    );
+
+    // 当前译文到达：应当正常结束 barrier 并落盘。
+    chat.on_agent_reasoning_body_translated(
+        request_id_2,
+        thread_id,
+        Some("Thinking".to_string()),
+        Some("**新**\n\n新译文".to_string()),
+        None,
+    );
+    assert!(
+        chat.agent_reasoning_body_translation_barrier.is_none(),
+        "expected barrier to clear after matching translation result"
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let combined = cells
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>();
+
+    assert!(
+        combined.iter().all(|s| !s.contains("旧译文")),
+        "did not expect late translation to be inserted: {combined:?}"
+    );
+    assert!(
+        combined.iter().any(|s| s.contains("新译文")),
+        "expected current translation to be inserted: {combined:?}"
+    );
+}
+
+#[tokio::test]
+async fn reasoning_body_translation_barrier_does_not_skip_deferred_reasoning_blocks() {
+    if cfg!(target_os = "windows") {
+        // 该测试依赖 `sh`（用于最小化外部翻译器实现），Windows 上默认不可用。
+        return;
+    }
+
+    use codex_core::config::types::AgentReasoningTranslationConfig;
+    use std::time::Duration;
+
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.agent_reasoning_translation = Some(AgentReasoningTranslationConfig {
+        command: vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            r#"cat >/dev/null; printf '%s' '{"schema_version":1,"text":"**思考中**\\n\\n这里是译文。"}'"#
+                .to_string(),
+        ],
+        timeout: Duration::from_millis(2_000),
+    });
+
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+
+    // 推理块 1：先落盘原文推理摘要（对应真实运行时的 on_agent_reasoning_final）。
+    chat.add_boxed_history(history_cell::new_reasoning_summary_block(
+        "**Thinking**\n\nFirst reasoning.".to_string(),
+    ));
+
+    // barrier 期间追加推理块 2（会进入 deferred 队列）。
+    let request_id = chat
+        .begin_agent_reasoning_body_translation_barrier(thread_id, Some("Thinking".to_string()))
+        .expect("expected barrier to start");
+    chat.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+        ratatui::text::Line::from("AFTER_1"),
+    ]));
+    chat.add_boxed_history(history_cell::new_reasoning_summary_block(
+        "**Thinking**\n\nSecond reasoning.".to_string(),
+    ));
+    chat.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+        ratatui::text::Line::from("AFTER_2"),
+    ]));
+
+    // 模拟推理块 1 的译文返回：这会触发 flush deferred，并应当为推理块 2 启动下一次翻译。
+    chat.on_agent_reasoning_body_translated(
+        request_id,
+        thread_id,
+        Some("Thinking".to_string()),
+        Some("**思考中**\n\n这里是译文。".to_string()),
+        None,
+    );
+
+    let mut combined: Vec<String> = Vec::new();
+    let mut translation_cells_seen = 0usize;
+    let mut saw_after_2 = false;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline && (translation_cells_seen < 2 || !saw_after_2) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let Ok(Some(ev)) = tokio::time::timeout(remaining, rx.recv()).await else {
+            break;
+        };
+
+        match ev {
+            AppEvent::InsertHistoryCell(cell) => {
+                let s = lines_to_single_string(&cell.display_lines(80));
+                if s.contains("这里是译文") {
+                    translation_cells_seen += 1;
+                }
+                if s.contains("AFTER_2") {
+                    saw_after_2 = true;
+                }
+                combined.push(s);
+            }
+            AppEvent::AgentReasoningBodyTranslated {
+                request_id,
+                thread_id,
+                title,
+                translated,
+                error,
+            } => chat.on_agent_reasoning_body_translated(
+                request_id, thread_id, title, translated, error,
+            ),
+            _ => {}
+        }
+    }
+
+    fn find_idx(haystack: &[String], needle: &str) -> usize {
+        haystack
+            .iter()
+            .position(|s| s.contains(needle))
+            .unwrap_or_else(|| panic!("missing {needle:?} in {haystack:?}"))
+    }
+
+    let idx_r1 = find_idx(&combined, "First reasoning");
+    let idx_after_1 = find_idx(&combined, "AFTER_1");
+    let idx_r2 = find_idx(&combined, "Second reasoning");
+    let idx_after_2 = find_idx(&combined, "AFTER_2");
+
+    let translation_indices: Vec<usize> = combined
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, s)| s.contains("这里是译文").then_some(idx))
+        .collect();
+    assert_eq!(
+        translation_indices.len(),
+        2,
+        "expected 2 translation cells: {combined:?}"
+    );
+
+    let idx_t1 = translation_indices[0];
+    let idx_t2 = translation_indices[1];
+    assert!(
+        idx_r1 < idx_t1
+            && idx_t1 < idx_after_1
+            && idx_after_1 < idx_r2
+            && idx_r2 < idx_t2
+            && idx_t2 < idx_after_2,
+        "unexpected insertion order: {combined:?}"
+    );
+}
+
+#[test]
+fn extract_reasoning_body_for_translation_requires_header_and_body() {
+    assert_eq!(extract_reasoning_body_for_translation("no header"), None);
+    assert_eq!(extract_reasoning_body_for_translation("**Thinking**"), None);
+    assert_eq!(
+        extract_reasoning_body_for_translation("**Thinking**  hello"),
+        Some("hello".to_string())
+    );
+    assert_eq!(
+        extract_reasoning_body_for_translation("**Thinking**\n\nhello"),
+        Some("hello".to_string())
+    );
 }

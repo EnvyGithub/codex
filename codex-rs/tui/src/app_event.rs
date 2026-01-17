@@ -94,6 +94,15 @@ pub(crate) enum AppEvent {
 
     InsertHistoryCell(Box<dyn HistoryCell>),
 
+    /// 推理（AgentReasoning）正文翻译结果回传（外部命令插件）。
+    AgentReasoningBodyTranslated {
+        request_id: u64,
+        thread_id: ThreadId,
+        title: Option<String>,
+        translated: Option<String>,
+        error: Option<String>,
+    },
+
     StartCommitAnimation,
     StopCommitAnimation,
     CommitTick,
