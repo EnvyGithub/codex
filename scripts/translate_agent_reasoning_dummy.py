@@ -9,6 +9,7 @@
   [translation.agent_reasoning]
   command = ["python3", "/path/to/translate_agent_reasoning_dummy.py"]
   timeout_ms = 2000
+  ui_max_wait_ms = 5000
 
 协议：从 stdin 读取 JSON 请求，向 stdout 输出 JSON 响应。
 """
@@ -56,4 +57,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
