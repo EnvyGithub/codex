@@ -3992,7 +3992,7 @@ async fn reasoning_body_translation_barrier_keeps_translation_adjacent() {
         request_id,
         thread_id,
         Some("Thinking".to_string()),
-        Some("**思考中**\n\n这里是译文。".to_string()),
+        Some("**思考中**\n\n这里是中文翻译。".to_string()),
         None,
     );
 
@@ -4009,9 +4009,9 @@ async fn reasoning_body_translation_barrier_keeps_translation_adjacent() {
         "missing reasoning block in first cell: {combined:?}"
     );
     assert!(
-        combined
-            .get(1)
-            .is_some_and(|s| s.contains("译文") && s.contains("这里是译文")),
+        combined.get(1).is_some_and(|s| s.contains("└ ")
+            && s.contains("这里是中文翻译")
+            && !s.contains("└ 译文")),
         "expected translation cell immediately after reasoning: {combined:?}"
     );
     assert!(
@@ -4146,7 +4146,7 @@ async fn reasoning_body_translation_barrier_does_not_skip_deferred_reasoning_blo
         command: vec![
             "sh".to_string(),
             "-c".to_string(),
-            r#"cat >/dev/null; printf '%s' '{"schema_version":1,"text":"**思考中**\\n\\n这里是译文。"}'"#
+            r#"cat >/dev/null; printf '%s' '{"schema_version":1,"text":"**思考中**\\n\\n这里是中文翻译。"}'"#
                 .to_string(),
         ],
         timeout: Duration::from_millis(2_000),
@@ -4179,7 +4179,7 @@ async fn reasoning_body_translation_barrier_does_not_skip_deferred_reasoning_blo
         request_id,
         thread_id,
         Some("Thinking".to_string()),
-        Some("**思考中**\n\n这里是译文。".to_string()),
+        Some("**思考中**\n\n这里是中文翻译。".to_string()),
         None,
     );
 
@@ -4197,7 +4197,7 @@ async fn reasoning_body_translation_barrier_does_not_skip_deferred_reasoning_blo
         match ev {
             AppEvent::InsertHistoryCell(cell) => {
                 let s = lines_to_single_string(&cell.display_lines(80));
-                if s.contains("这里是译文") {
+                if s.contains("这里是中文翻译") {
                     translation_cells_seen += 1;
                 }
                 if s.contains("AFTER_2") {
@@ -4233,7 +4233,7 @@ async fn reasoning_body_translation_barrier_does_not_skip_deferred_reasoning_blo
     let translation_indices: Vec<usize> = combined
         .iter()
         .enumerate()
-        .filter_map(|(idx, s)| s.contains("这里是译文").then_some(idx))
+        .filter_map(|(idx, s)| s.contains("这里是中文翻译").then_some(idx))
         .collect();
     assert_eq!(
         translation_indices.len(),

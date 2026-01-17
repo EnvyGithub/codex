@@ -377,23 +377,6 @@ impl AgentReasoningTranslationCell {
     }
 
     fn lines_with_joiners(&self, width: u16) -> TranscriptLinesWithJoiners {
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        let mut joiner_before: Vec<Option<String>> = Vec::new();
-
-        let mut header: Vec<Span<'static>> = Vec::new();
-        header.push("  └ ".dim());
-        if self.is_error {
-            header.push("译文生成失败".red().bold());
-        } else if let Some(title) = &self.title {
-            // 注意：原文推理历史默认不显示首个粗体标题（仅用于状态栏），
-            // 为避免“译文块比原文多一行标题”造成困惑，这里也不强制输出标题。
-            header.push(title.clone().bold().dim());
-        } else {
-            header.push("译文".bold().dim());
-        }
-        lines.push(Line::from(header));
-        joiner_before.push(None);
-
         let mut md_lines: Vec<Line<'static>> = Vec::new();
         append_markdown(
             &self.content,
@@ -414,15 +397,45 @@ impl AgentReasoningTranslationCell {
             })
             .collect::<Vec<_>>();
 
-        let (wrapped, wrapped_joiners) = crate::wrapping::word_wrap_lines_with_joiners(
+        if self.is_error {
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            let mut joiner_before: Vec<Option<String>> = Vec::new();
+
+            let mut header: Vec<Span<'static>> = Vec::new();
+            header.push("  └ ".dim());
+            header.push("译文生成失败".red().bold());
+            if let Some(title) = &self.title {
+                header.push(" ".into());
+                header.push(format!("({title})").dim());
+            }
+
+            lines.push(Line::from(header));
+            joiner_before.push(None);
+
+            let (wrapped, wrapped_joiners) = crate::wrapping::word_wrap_lines_with_joiners(
+                &styled_md_lines,
+                RtOptions::new(width as usize)
+                    .initial_indent("    ".into())
+                    .subsequent_indent("    ".into()),
+            );
+
+            lines.extend(wrapped);
+            joiner_before.extend(wrapped_joiners);
+
+            return TranscriptLinesWithJoiners {
+                lines,
+                joiner_before,
+            };
+        }
+
+        // 选项 B：成功时不额外显示 “└ 译文” 标题行，
+        // 直接把译文正文作为子节点输出，避免比原文多一行“标签”。
+        let (lines, joiner_before) = crate::wrapping::word_wrap_lines_with_joiners(
             &styled_md_lines,
             RtOptions::new(width as usize)
-                .initial_indent("    ".into())
+                .initial_indent("  └ ".dim().into())
                 .subsequent_indent("    ".into()),
         );
-
-        lines.extend(wrapped);
-        joiner_before.extend(wrapped_joiners);
 
         TranscriptLinesWithJoiners {
             lines,
