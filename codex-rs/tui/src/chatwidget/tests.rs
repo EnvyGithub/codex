@@ -4021,6 +4021,40 @@ async fn reasoning_body_translation_barrier_keeps_translation_adjacent() {
 }
 
 #[tokio::test]
+async fn reasoning_body_translation_barrier_uses_config_ui_max_wait() {
+    use codex_core::config::types::AgentReasoningTranslationConfig;
+    use std::time::Duration;
+
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    // 这里不需要真实可执行的 command：该测试仅验证 barrier 的等待时间取值逻辑。
+    chat.config.agent_reasoning_translation = Some(AgentReasoningTranslationConfig {
+        command: Vec::new(),
+        timeout: Duration::from_millis(2_000),
+        ui_max_wait: Duration::from_millis(12_345),
+    });
+
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+
+    let expected = std::env::var("CODEX_TUI_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_millis(12_345));
+
+    let _request_id = chat
+        .begin_agent_reasoning_body_translation_barrier(thread_id, Some("Thinking".to_string()))
+        .expect("expected barrier to start");
+
+    let barrier = chat
+        .agent_reasoning_body_translation_barrier
+        .as_ref()
+        .expect("barrier should exist");
+    assert_eq!(barrier.max_wait, expected);
+}
+
+#[tokio::test]
 async fn reasoning_body_translation_barrier_times_out_and_flushes_buffer() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
 
@@ -4150,6 +4184,7 @@ async fn reasoning_body_translation_barrier_does_not_skip_deferred_reasoning_blo
                 .to_string(),
         ],
         timeout: Duration::from_millis(2_000),
+        ui_max_wait: Duration::from_millis(5_000),
     });
 
     let thread_id = ThreadId::new();

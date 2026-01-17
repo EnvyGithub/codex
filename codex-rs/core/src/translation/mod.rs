@@ -224,6 +224,7 @@ sys.stdout.write(json.dumps(out))
                 script.to_string_lossy().to_string(),
             ],
             timeout: Duration::from_millis(2_000),
+            ui_max_wait: Duration::from_millis(5_000),
         };
 
         let translated = translate_text(&config, TranslationKind::AgentReasoningTitle, "Thinking")
@@ -256,6 +257,7 @@ sys.exit(2)
                 script.to_string_lossy().to_string(),
             ],
             timeout: Duration::from_millis(2_000),
+            ui_max_wait: Duration::from_millis(5_000),
         };
 
         let err = translate_text(&config, TranslationKind::AgentReasoningTitle, "Thinking")
@@ -289,6 +291,7 @@ time.sleep(5)
                 script.to_string_lossy().to_string(),
             ],
             timeout: Duration::from_millis(50),
+            ui_max_wait: Duration::from_millis(5_000),
         };
 
         let err = translate_text(&config, TranslationKind::AgentReasoningTitle, "Thinking")
