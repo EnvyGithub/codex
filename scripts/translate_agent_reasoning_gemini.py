@@ -14,6 +14,7 @@ Google Gemini 翻译器示例（用于 Codex “推理输出翻译插件”）�
   [translation.agent_reasoning]
   command = ["python3", "/path/to/translate_agent_reasoning_gemini.py"]
   timeout_ms = 8000
+  ui_max_wait_ms = 5000
 
 环境变量：
 - CODEX_GEMINI_BASE_URL：Gemini API Base URL
