@@ -316,6 +316,29 @@ enum RateLimitSwitchPromptState {
     Shown,
 }
 
+/// 推理（AgentReasoning）正文翻译的 UI 对齐等待时间上限（默认 5 秒）。
+///
+/// 说明：
+/// - 方案 A：为了保证“译文紧跟在原文下面”，在译文生成完成（或超时）前，
+///   会短暂缓冲后续的历史输出，避免其它块插入导致错位。
+/// - 该等待仅影响“历史输出的落盘顺序”，不会阻塞 agent 本身继续运行。
+const DEFAULT_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS: u64 = 5_000;
+
+/// 覆盖推理译文对齐等待上限的环境变量（单位：毫秒）。
+///
+/// 示例：`CODEX_TUI_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS=5000`
+const AGENT_REASONING_TRANSLATION_MAX_WAIT_ENV: &str =
+    "CODEX_TUI_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS";
+
+#[derive(Debug)]
+struct AgentReasoningBodyTranslationBarrier {
+    request_id: u64,
+    thread_id: ThreadId,
+    title: Option<String>,
+    max_wait: Duration,
+    deadline: Instant,
+}
+
 /// Maintains the per-session UI state and interaction state machines for the chat screen.
 ///
 /// `ChatWidget` owns the state derived from the protocol event stream (history cells, streaming
@@ -378,6 +401,12 @@ pub(crate) struct ChatWidget {
     reasoning_buffer: String,
     // Accumulates full reasoning content for transcript-only recording
     full_reasoning_buffer: String,
+    // ===== 推理翻译（外部命令插件） =====
+    agent_reasoning_title_translation_cache: HashMap<String, String>,
+    current_reasoning_title_raw: Option<String>,
+    agent_reasoning_body_translation_barrier: Option<AgentReasoningBodyTranslationBarrier>,
+    deferred_history_cells: VecDeque<Box<dyn HistoryCell>>,
+    agent_reasoning_body_translation_seq: u64,
     // Current status header shown in the status indicator.
     current_status_header: String,
     // Previous status header to restore after a transient stream retry.
@@ -616,8 +645,16 @@ impl ChatWidget {
         self.reasoning_buffer.push_str(&delta);
 
         if let Some(header) = extract_first_bold(&self.reasoning_buffer) {
-            // Update the shimmer header to the extracted reasoning chunk header.
-            self.set_status_header(header);
+            self.current_reasoning_title_raw = Some(header.clone());
+
+            // 先立即显示原文标题；如已从“正文翻译结果”中提取并缓存译文，则显示双语标题。
+            if let Some(translated) = self.agent_reasoning_title_translation_cache.get(&header) {
+                self.set_status_header(codex_core::translation::format_bilingual_title(
+                    &header, translated,
+                ));
+            } else {
+                self.set_status_header(header);
+            }
         } else {
             // Fallback while we don't yet have a bold header: leave existing header as-is.
         }
@@ -628,9 +665,11 @@ impl ChatWidget {
         // At the end of a reasoning block, record transcript-only content.
         self.full_reasoning_buffer.push_str(&self.reasoning_buffer);
         if !self.full_reasoning_buffer.is_empty() {
-            let cell =
-                history_cell::new_reasoning_summary_block(self.full_reasoning_buffer.clone());
+            let full_reasoning = self.full_reasoning_buffer.clone();
+            let cell = history_cell::new_reasoning_summary_block(full_reasoning.clone());
             self.add_boxed_history(cell);
+
+            self.maybe_translate_reasoning_body(full_reasoning);
         }
         self.reasoning_buffer.clear();
         self.full_reasoning_buffer.clear();
@@ -642,6 +681,131 @@ impl ChatWidget {
         self.full_reasoning_buffer.push_str(&self.reasoning_buffer);
         self.full_reasoning_buffer.push_str("\n\n");
         self.reasoning_buffer.clear();
+    }
+
+    fn maybe_translate_reasoning_body(&mut self, full_reasoning: String) {
+        let Some(config) = self.config.agent_reasoning_translation.clone() else {
+            return;
+        };
+        let Some(thread_id) = self.conversation_id else {
+            return;
+        };
+
+        let title = extract_first_bold(&full_reasoning);
+        let Some(body) = extract_reasoning_body_for_translation(&full_reasoning) else {
+            return;
+        };
+        if body.trim().is_empty() {
+            return;
+        }
+
+        // 方案 A：为保证译文紧跟原文，在译文生成完成（或超时）前，缓冲后续历史输出。
+        let Some(request_id) =
+            self.begin_agent_reasoning_body_translation_barrier(thread_id, title.clone())
+        else {
+            return;
+        };
+
+        // 仅调用一次翻译：把 “**标题** + 正文” 一起交给外部翻译器。
+        // 这样可以在同一次返回中拿到“主题译文 + 正文译文”，避免标题/正文分别调用带来的成本与延迟。
+        let full_reasoning_for_translation = full_reasoning;
+        let tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = codex_core::translation::translate_text(
+                &config,
+                codex_core::translation::TranslationKind::AgentReasoningBody,
+                &full_reasoning_for_translation,
+            )
+            .await;
+
+            match result {
+                Ok(translated) => tx.send(AppEvent::AgentReasoningBodyTranslated {
+                    request_id,
+                    thread_id,
+                    title,
+                    translated: Some(translated),
+                    error: None,
+                }),
+                Err(err) => tx.send(AppEvent::AgentReasoningBodyTranslated {
+                    request_id,
+                    thread_id,
+                    title,
+                    translated: None,
+                    error: Some(err.to_string()),
+                }),
+            };
+        });
+    }
+
+    pub(crate) fn on_agent_reasoning_body_translated(
+        &mut self,
+        request_id: u64,
+        thread_id: ThreadId,
+        title: Option<String>,
+        translated: Option<String>,
+        error: Option<String>,
+    ) {
+        let Some(barrier) = self.agent_reasoning_body_translation_barrier.as_ref() else {
+            // 已超时释放，或会话已切换；为保证“译文紧跟原文”，这里不再追加晚到的译文。
+            return;
+        };
+        if barrier.request_id != request_id {
+            return;
+        }
+        if barrier.thread_id != thread_id {
+            return;
+        }
+        if self.conversation_id.as_ref() != Some(&thread_id) {
+            return;
+        }
+
+        // 先结束 barrier，确保译文与后续缓冲内容按顺序落盘。
+        self.agent_reasoning_body_translation_barrier = None;
+
+        if let Some(translated) = translated {
+            // 译文返回的是完整块（包含 `**标题**`），这里再拆分出：
+            // - 主题译文：用于译文块标题 & 状态栏缓存
+            // - 正文译文：用于译文块内容（避免重复显示标题）
+            let translated_title = extract_first_bold(&translated);
+            let translated_body = extract_reasoning_body_for_translation(&translated)
+                .unwrap_or_else(|| translated.clone())
+                .trim()
+                .to_string();
+
+            // 尽力缓存标题译文（用于后续实时 status 显示），但不强行兜底二次翻译。
+            if let (Some(original), Some(translated_title)) =
+                (title.as_deref(), translated_title.as_deref())
+            {
+                self.agent_reasoning_title_translation_cache
+                    .insert(original.to_string(), translated_title.to_string());
+
+                if self.conversation_id.as_ref() == Some(&thread_id)
+                    && self.current_reasoning_title_raw.as_deref() == Some(original)
+                {
+                    self.set_status_header(codex_core::translation::format_bilingual_title(
+                        original,
+                        translated_title,
+                    ));
+                }
+            }
+
+            self.emit_history_cell(history_cell::new_agent_reasoning_translation_block(
+                None,
+                if translated_body.is_empty() {
+                    translated
+                } else {
+                    translated_body
+                },
+            ));
+        } else {
+            let reason = error.unwrap_or_else(|| "unknown error".to_string());
+            self.emit_history_cell(history_cell::new_agent_reasoning_translation_error_block(
+                title, reason,
+            ));
+        }
+
+        self.flush_deferred_history_cells();
+        self.request_redraw();
     }
 
     // Raw reasoning uses the same flow as summarized reasoning
@@ -657,6 +821,7 @@ impl ChatWidget {
         self.set_status_header(String::from("Working"));
         self.full_reasoning_buffer.clear();
         self.reasoning_buffer.clear();
+        self.current_reasoning_title_raw = None;
         self.request_redraw();
     }
 
@@ -1499,6 +1664,11 @@ impl ChatWidget {
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
+            agent_reasoning_title_translation_cache: HashMap::new(),
+            current_reasoning_title_raw: None,
+            agent_reasoning_body_translation_barrier: None,
+            deferred_history_cells: VecDeque::new(),
+            agent_reasoning_body_translation_seq: 0,
             current_status_header: String::from("Working"),
             retry_status_header: None,
             conversation_id: None,
@@ -1595,6 +1765,11 @@ impl ChatWidget {
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
+            agent_reasoning_title_translation_cache: HashMap::new(),
+            current_reasoning_title_raw: None,
+            agent_reasoning_body_translation_barrier: None,
+            deferred_history_cells: VecDeque::new(),
+            agent_reasoning_body_translation_seq: 0,
             current_status_header: String::from("Working"),
             retry_status_header: None,
             conversation_id: None,
@@ -1979,10 +2154,106 @@ impl ChatWidget {
         }
     }
 
+    fn agent_reasoning_translation_max_wait() -> Duration {
+        match std::env::var(AGENT_REASONING_TRANSLATION_MAX_WAIT_ENV) {
+            Ok(raw) => match raw.trim().parse::<u64>() {
+                Ok(ms) => Duration::from_millis(ms),
+                Err(err) => {
+                    tracing::warn!(
+                        "无法解析环境变量 {AGENT_REASONING_TRANSLATION_MAX_WAIT_ENV}={raw:?}：{err}；将使用默认值 {DEFAULT_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS}ms"
+                    );
+                    Duration::from_millis(DEFAULT_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS)
+                }
+            },
+            Err(_) => Duration::from_millis(DEFAULT_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS),
+        }
+    }
+
+    fn begin_agent_reasoning_body_translation_barrier(
+        &mut self,
+        thread_id: ThreadId,
+        title: Option<String>,
+    ) -> Option<u64> {
+        if self.agent_reasoning_body_translation_barrier.is_some() {
+            // 同一时刻只允许一个 barrier；避免多段推理并发时造成输出死锁。
+            return None;
+        }
+        let request_id = self.agent_reasoning_body_translation_seq;
+        self.agent_reasoning_body_translation_seq =
+            self.agent_reasoning_body_translation_seq.saturating_add(1);
+        let max_wait = Self::agent_reasoning_translation_max_wait();
+        let deadline = Instant::now()
+            .checked_add(max_wait)
+            .unwrap_or_else(Instant::now);
+        self.agent_reasoning_body_translation_barrier =
+            Some(AgentReasoningBodyTranslationBarrier {
+                request_id,
+                thread_id,
+                title,
+                max_wait,
+                deadline,
+            });
+        // 触发一个未来的 Draw tick，用于在没有其它事件到来时也能按时超时释放。
+        self.frame_requester.schedule_frame_in(max_wait);
+        Some(request_id)
+    }
+
+    pub(crate) fn maybe_flush_agent_reasoning_body_translation_barrier_timeout(&mut self) {
+        let Some(barrier) = self.agent_reasoning_body_translation_barrier.as_ref() else {
+            return;
+        };
+        if Instant::now() < barrier.deadline {
+            return;
+        }
+
+        let title = barrier.title.clone();
+        let max_wait = barrier.max_wait;
+        let max_wait_ms = max_wait.as_millis();
+
+        // 先结束 barrier，再输出失败块与缓冲内容，确保它们按顺序落盘。
+        self.agent_reasoning_body_translation_barrier = None;
+        self.emit_history_cell(history_cell::new_agent_reasoning_translation_error_block(
+            title,
+            format!("等待超时（{max_wait_ms}ms），已跳过译文输出"),
+        ));
+        self.flush_deferred_history_cells();
+        self.request_redraw();
+    }
+
+    fn emit_history_cell(&mut self, cell: Box<dyn HistoryCell>) {
+        if self.agent_reasoning_body_translation_barrier.is_some() {
+            self.deferred_history_cells.push_back(cell);
+        } else {
+            self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
+        }
+    }
+
+    fn flush_deferred_history_cells(&mut self) {
+        while let Some(cell) = self.deferred_history_cells.pop_front() {
+            let maybe_reasoning_for_translation = cell
+                .as_any()
+                .downcast_ref::<history_cell::ReasoningSummaryCell>()
+                .and_then(history_cell::ReasoningSummaryCell::full_markdown_for_translation);
+
+            self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
+
+            if let Some(full_reasoning) = maybe_reasoning_for_translation {
+                // barrier 期间可能积压了新的推理块；这里遇到推理块就尝试启动下一次翻译，
+                // 并立即停止继续 flush，以保持“译文紧跟原文”的历史顺序。
+                if self.agent_reasoning_body_translation_barrier.is_none() {
+                    self.maybe_translate_reasoning_body(full_reasoning);
+                    if self.agent_reasoning_body_translation_barrier.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     fn flush_active_cell(&mut self) {
         if let Some(active) = self.active_cell.take() {
             self.needs_final_message_separator = true;
-            self.app_event_tx.send(AppEvent::InsertHistoryCell(active));
+            self.emit_history_cell(active);
         }
     }
 
@@ -2004,7 +2275,7 @@ impl ChatWidget {
             self.flush_active_cell();
             self.needs_final_message_separator = true;
         }
-        self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
+        self.emit_history_cell(cell);
     }
 
     #[allow(dead_code)] // Used in tests
@@ -2029,11 +2300,9 @@ impl ChatWidget {
         if let Some(stripped) = text.strip_prefix('!') {
             let cmd = stripped.trim();
             if cmd.is_empty() {
-                self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-                    history_cell::new_info_event(
-                        USER_SHELL_COMMAND_HELP_TITLE.to_string(),
-                        Some(USER_SHELL_COMMAND_HELP_HINT.to_string()),
-                    ),
+                self.emit_history_cell(Box::new(history_cell::new_info_event(
+                    USER_SHELL_COMMAND_HELP_TITLE.to_string(),
+                    Some(USER_SHELL_COMMAND_HELP_HINT.to_string()),
                 )));
                 return;
             }
@@ -2278,8 +2547,7 @@ impl ChatWidget {
                     let mut rendered: Vec<ratatui::text::Line<'static>> = vec!["".into()];
                     append_markdown(&explanation, None, &mut rendered);
                     let body_cell = AgentMessageCell::new(rendered, false);
-                    self.app_event_tx
-                        .send(AppEvent::InsertHistoryCell(Box::new(body_cell)));
+                    self.emit_history_cell(Box::new(body_cell));
                 }
             }
             // Final message is rendered as part of the AgentMessage.
@@ -4241,6 +4509,27 @@ fn extract_first_bold(s: &str) -> Option<String> {
         i += 1;
     }
     None
+}
+
+/// 从推理 Markdown 中提取“正文”部分（去掉首个 `**标题**`）。
+///
+/// 若未找到完整的 `**...**`，或标题后没有正文，则返回 `None`。
+fn extract_reasoning_body_for_translation(full_reasoning_markdown: &str) -> Option<String> {
+    let full_reasoning_markdown = full_reasoning_markdown.trim();
+    let open = full_reasoning_markdown.find("**")?;
+    let after_open = &full_reasoning_markdown[(open + 2)..];
+    let close = after_open.find("**")?;
+
+    let after_close_idx = open + 2 + close + 2;
+    if after_close_idx >= full_reasoning_markdown.len() {
+        return None;
+    }
+    let body = full_reasoning_markdown[after_close_idx..].trim_start();
+    if body.is_empty() {
+        None
+    } else {
+        Some(body.to_string())
+    }
 }
 
 async fn fetch_rate_limits(base_url: String, auth: CodexAuth) -> Option<RateLimitSnapshot> {

@@ -275,6 +275,16 @@ impl ReasoningSummaryCell {
         }
     }
 
+    pub(crate) fn full_markdown_for_translation(&self) -> Option<String> {
+        if self.transcript_only {
+            return None;
+        }
+        if self._header.trim().is_empty() {
+            return None;
+        }
+        Some(format!("{}{}", self._header, self.content))
+    }
+
     fn lines(&self, width: u16) -> Vec<Line<'static>> {
         self.lines_with_joiners(width).lines
     }
@@ -340,6 +350,106 @@ impl HistoryCell for ReasoningSummaryCell {
 
     fn desired_transcript_height(&self, width: u16) -> u16 {
         self.lines(width).len() as u16
+    }
+}
+
+/// 推理（AgentReasoning）译文块。
+///
+/// 说明：
+/// - `codex-tui2` 的 transcript 使用缓存，要求 history cells 追加后不可变。
+/// - 因此译文在翻译完成后**追加**到历史中，而不是“占位后原地更新”。
+/// - transcript 复制需要 joiners 信息，这里实现 `transcript_lines_with_joiners`，
+///   确保软换行复制时不会引入多余换行。
+#[derive(Debug)]
+pub(crate) struct AgentReasoningTranslationCell {
+    title: Option<String>,
+    content: String,
+    is_error: bool,
+}
+
+impl AgentReasoningTranslationCell {
+    pub(crate) fn new(title: Option<String>, content: String, is_error: bool) -> Self {
+        Self {
+            title,
+            content,
+            is_error,
+        }
+    }
+
+    fn lines_with_joiners(&self, width: u16) -> TranscriptLinesWithJoiners {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut joiner_before: Vec<Option<String>> = Vec::new();
+
+        let mut header: Vec<Span<'static>> = Vec::new();
+        header.push("  └ ".dim());
+        if self.is_error {
+            header.push("译文生成失败".red().bold());
+        } else if let Some(title) = &self.title {
+            // 注意：原文推理历史默认不显示首个粗体标题（仅用于状态栏），
+            // 为避免“译文块比原文多一行标题”造成困惑，这里也不强制输出标题。
+            header.push(title.clone().bold().dim());
+        } else {
+            header.push("译文".bold().dim());
+        }
+        lines.push(Line::from(header));
+        joiner_before.push(None);
+
+        let mut md_lines: Vec<Line<'static>> = Vec::new();
+        append_markdown(
+            &self.content,
+            Some((width as usize).saturating_sub(4).max(1)),
+            &mut md_lines,
+        );
+
+        let translation_style = Style::default().dim();
+        let styled_md_lines = md_lines
+            .into_iter()
+            .map(|mut line| {
+                line.spans = line
+                    .spans
+                    .into_iter()
+                    .map(|span| span.patch_style(translation_style))
+                    .collect();
+                line
+            })
+            .collect::<Vec<_>>();
+
+        let (wrapped, wrapped_joiners) = crate::wrapping::word_wrap_lines_with_joiners(
+            &styled_md_lines,
+            RtOptions::new(width as usize)
+                .initial_indent("    ".into())
+                .subsequent_indent("    ".into()),
+        );
+
+        lines.extend(wrapped);
+        joiner_before.extend(wrapped_joiners);
+
+        TranscriptLinesWithJoiners {
+            lines,
+            joiner_before,
+        }
+    }
+}
+
+impl HistoryCell for AgentReasoningTranslationCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.lines_with_joiners(width).lines
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        self.display_lines(width).len() as u16
+    }
+
+    fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.display_lines(width)
+    }
+
+    fn transcript_lines_with_joiners(&self, width: u16) -> TranscriptLinesWithJoiners {
+        self.lines_with_joiners(width)
+    }
+
+    fn desired_transcript_height(&self, width: u16) -> u16 {
+        self.display_lines(width).len() as u16
     }
 }
 
@@ -1731,6 +1841,24 @@ pub(crate) fn new_reasoning_summary_block(full_reasoning_buffer: String) -> Box<
     Box::new(ReasoningSummaryCell::new(
         "".to_string(),
         full_reasoning_buffer.to_string(),
+        true,
+    ))
+}
+
+pub(crate) fn new_agent_reasoning_translation_block(
+    title: Option<String>,
+    translated: String,
+) -> Box<dyn HistoryCell> {
+    Box::new(AgentReasoningTranslationCell::new(title, translated, false))
+}
+
+pub(crate) fn new_agent_reasoning_translation_error_block(
+    title: Option<String>,
+    reason: String,
+) -> Box<dyn HistoryCell> {
+    Box::new(AgentReasoningTranslationCell::new(
+        title,
+        format!("译文生成失败：{reason}"),
         true,
     ))
 }

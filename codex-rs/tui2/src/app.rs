@@ -689,6 +689,8 @@ impl App {
         event: TuiEvent,
     ) -> Result<AppRunControl> {
         if matches!(&event, TuiEvent::Draw) {
+            self.chat_widget
+                .maybe_flush_agent_reasoning_body_translation_barrier_timeout();
             self.handle_scroll_tick(tui);
         }
 
@@ -1609,6 +1611,17 @@ impl App {
                 if self.overlay.is_some() {
                     self.deferred_history_cells.push(cell);
                 }
+            }
+            AppEvent::AgentReasoningBodyTranslated {
+                request_id,
+                thread_id,
+                title,
+                translated,
+                error,
+            } => {
+                self.chat_widget.on_agent_reasoning_body_translated(
+                    request_id, thread_id, title, translated, error,
+                );
             }
             AppEvent::StartCommitAnimation => {
                 if self

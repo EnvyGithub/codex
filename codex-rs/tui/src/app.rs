@@ -606,6 +606,10 @@ impl App {
         tui: &mut tui::Tui,
         event: TuiEvent,
     ) -> Result<AppRunControl> {
+        if matches!(event, TuiEvent::Draw) {
+            self.chat_widget
+                .maybe_flush_agent_reasoning_body_translation_barrier_timeout();
+        }
         if self.overlay.is_some() {
             let _ = self.handle_backtrack_overlay_event(tui, event).await?;
         } else {
@@ -852,6 +856,17 @@ impl App {
                         tui.insert_history_lines(display);
                     }
                 }
+            }
+            AppEvent::AgentReasoningBodyTranslated {
+                request_id,
+                thread_id,
+                title,
+                translated,
+                error,
+            } => {
+                self.chat_widget.on_agent_reasoning_body_translated(
+                    request_id, thread_id, title, translated, error,
+                );
             }
             AppEvent::StartCommitAnimation => {
                 if self

@@ -14,6 +14,7 @@ use codex_common::approval_presets::ApprovalPreset;
 use codex_core::protocol::Event;
 use codex_core::protocol::RateLimitSnapshot;
 use codex_file_search::FileMatch;
+use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ModelPreset;
 
 use crate::bottom_pane::ApprovalRequest;
@@ -85,6 +86,15 @@ pub(crate) enum AppEvent {
     DiffResult(String),
 
     InsertHistoryCell(Box<dyn HistoryCell>),
+
+    /// 推理（AgentReasoning）正文翻译结果回传（外部命令插件）。
+    AgentReasoningBodyTranslated {
+        request_id: u64,
+        thread_id: ThreadId,
+        title: Option<String>,
+        translated: Option<String>,
+        error: Option<String>,
+    },
 
     StartCommitAnimation,
     StopCommitAnimation,

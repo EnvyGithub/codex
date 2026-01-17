@@ -8,7 +8,7 @@
 //! Some footer content is time-based rather than event-based, such as the "press again to quit"
 //! hint. The owning widgets schedule redraws so time-based hints can expire even if the UI is
 //! otherwise idle.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(test)))]
 use crate::clipboard_paste::is_probably_wsl;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
@@ -125,9 +125,10 @@ fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
             vec![line]
         }
         FooterMode::ShortcutOverlay => {
-            #[cfg(target_os = "linux")]
+            // 快照测试需要跨环境稳定；测试中禁用 WSL 检测，避免渲染出的快捷键提示依赖 /proc/version。
+            #[cfg(all(target_os = "linux", not(test)))]
             let is_wsl = is_probably_wsl();
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(any(not(target_os = "linux"), test))]
             let is_wsl = false;
 
             let state = ShortcutsState {
