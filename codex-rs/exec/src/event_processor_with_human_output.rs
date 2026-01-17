@@ -1,6 +1,7 @@
 use codex_common::elapsed::format_duration;
 use codex_common::elapsed::format_elapsed;
 use codex_core::config::Config;
+use codex_core::config::types::AgentReasoningTranslationConfig;
 use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningRawContentEvent;
 use codex_core::protocol::AgentStatus;
@@ -39,6 +40,10 @@ use owo_colors::Style;
 use shlex::try_join;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::sync::mpsc::TryRecvError;
+use std::thread;
+use std::time::Duration;
 use std::time::Instant;
 
 use crate::event_processor::CodexStatus;
@@ -70,6 +75,10 @@ pub(crate) struct EventProcessorWithHumanOutput {
     /// Whether to include `AgentReasoning` events in the output.
     show_agent_reasoning: bool,
     show_raw_agent_reasoning: bool,
+    agent_reasoning_translation: Option<AgentReasoningTranslationConfig>,
+    translation_tx: mpsc::Sender<ReasoningTranslationResult>,
+    translation_rx: mpsc::Receiver<ReasoningTranslationResult>,
+    in_flight_reasoning_translations: usize,
     last_message_path: Option<PathBuf>,
     last_total_token_usage: Option<codex_core::protocol::TokenUsageInfo>,
     final_message: Option<String>,
@@ -82,6 +91,8 @@ impl EventProcessorWithHumanOutput {
         last_message_path: Option<PathBuf>,
     ) -> Self {
         let call_id_to_patch = HashMap::new();
+        let (translation_tx, translation_rx) = mpsc::channel();
+        let agent_reasoning_translation = config.agent_reasoning_translation.clone();
 
         if with_ansi {
             Self {
@@ -96,6 +107,10 @@ impl EventProcessorWithHumanOutput {
                 yellow: Style::new().yellow(),
                 show_agent_reasoning: !config.hide_agent_reasoning,
                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+                agent_reasoning_translation,
+                translation_tx,
+                translation_rx,
+                in_flight_reasoning_translations: 0,
                 last_message_path,
                 last_total_token_usage: None,
                 final_message: None,
@@ -113,17 +128,82 @@ impl EventProcessorWithHumanOutput {
                 yellow: Style::new(),
                 show_agent_reasoning: !config.hide_agent_reasoning,
                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+                agent_reasoning_translation,
+                translation_tx,
+                translation_rx,
+                in_flight_reasoning_translations: 0,
                 last_message_path,
                 last_total_token_usage: None,
                 final_message: None,
             }
         }
     }
+
+    fn drain_reasoning_translation_results(&mut self) {
+        loop {
+            match self.translation_rx.try_recv() {
+                Ok(msg) => {
+                    self.in_flight_reasoning_translations =
+                        self.in_flight_reasoning_translations.saturating_sub(1);
+                    match msg.result {
+                        Ok(translated) => {
+                            eprintln!("{}", "译文".style(self.italic).style(self.magenta));
+                            for line in translated.lines() {
+                                eprintln!("{}", line.style(self.dimmed));
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "{} {}",
+                                "译文生成失败:".style(self.red).style(self.bold),
+                                err.style(self.dimmed)
+                            );
+                        }
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+    }
+
+    fn spawn_reasoning_translation(&mut self, text: String) {
+        let Some(config) = self.agent_reasoning_translation.clone() else {
+            return;
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+
+        self.in_flight_reasoning_translations += 1;
+        let tx = self.translation_tx.clone();
+        thread::spawn(move || {
+            let result = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt
+                    .block_on(codex_core::translation::translate_text(
+                        &config,
+                        codex_core::translation::TranslationKind::AgentReasoningBody,
+                        &text,
+                    ))
+                    .map_err(|e| e.to_string()),
+                Err(err) => Err(err.to_string()),
+            };
+
+            let _ = tx.send(ReasoningTranslationResult { result });
+        });
+    }
 }
 
 struct PatchApplyBegin {
     start_time: Instant,
     auto_approved: bool,
+}
+
+struct ReasoningTranslationResult {
+    result: Result<String, String>,
 }
 
 /// Timestamped helper. The timestamp is styled with self.dimmed.
@@ -171,6 +251,8 @@ impl EventProcessor for EventProcessorWithHumanOutput {
 
     fn process_event(&mut self, event: Event) -> CodexStatus {
         let Event { id: _, msg } = event;
+        // best-effort：在处理新事件前先输出已完成的译文，避免后台线程直接写 stdout/stderr
+        self.drain_reasoning_translation_results();
         match msg {
             EventMsg::Error(ErrorEvent { message, .. }) => {
                 let prefix = "ERROR:".style(self.red);
@@ -285,8 +367,9 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                         self,
                         "{}\n{}",
                         "thinking".style(self.italic).style(self.magenta),
-                        text,
+                        &text,
                     );
+                    self.spawn_reasoning_translation(text);
                 }
             }
             EventMsg::AgentMessage(AgentMessageEvent { message }) => {
@@ -513,12 +596,14 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             }
             EventMsg::AgentReasoning(agent_reasoning_event) => {
                 if self.show_agent_reasoning {
+                    let text = agent_reasoning_event.text;
                     ts_msg!(
                         self,
                         "{}\n{}",
                         "thinking".style(self.italic).style(self.magenta),
-                        agent_reasoning_event.text,
+                        &text,
                     );
+                    self.spawn_reasoning_translation(text);
                 }
             }
             EventMsg::SessionConfigured(session_configured_event) => {
@@ -781,6 +866,17 @@ impl EventProcessor for EventProcessorWithHumanOutput {
     }
 
     fn print_final_output(&mut self) {
+        // 尽力输出已完成的译文，但不要阻塞退出流程。
+        // 如果译文线程仍在运行，这里最多等一个很短的时间窗口用于“捡漏”。
+        let start = Instant::now();
+        while self.in_flight_reasoning_translations > 0
+            && start.elapsed() < Duration::from_millis(50)
+        {
+            self.drain_reasoning_translation_results();
+            thread::sleep(Duration::from_millis(5));
+        }
+        self.drain_reasoning_translation_results();
+
         if let Some(usage_info) = &self.last_total_token_usage {
             eprintln!(
                 "{}\n{}",
