@@ -217,3 +217,100 @@ Codex 自身已经有两个与推理显示有关的配置键（见官方配置�
 
 - 如果你需要联网翻译：请确保你的翻译服务/代理满足你的合规要求。
 - 如果你不希望出网：请使用本地翻译器（例如本地模型或离线词典）。
+
+## 开发与升级（同步官方最新版 + 本地构建）
+
+本分支是在官方仓库 `openai/codex` 的源码上做的功能扩展。官方 `main` 更新很快，推荐把“同步上游 + 重新构建”固化为一套可重复流程，避免每次手动操作出错。
+
+### 远端约定（推荐）
+
+推荐使用这两个 remote：
+
+- `upstream`：官方仓库（`openai/codex`），只用于 `fetch`/对齐上游
+- `origin`：你的 fork（私有/公开均可），用于 `push`/备份/CI
+
+检查：
+
+```bash
+git remote -v
+```
+
+为了避免误推到官方仓库，建议禁用 `upstream` 的 push：
+
+```bash
+git remote set-url --push upstream DISABLED
+```
+
+> 说明：这不会影响 `fetch upstream`，只会阻止 `git push upstream ...`。
+
+### 一键同步脚本（推荐）
+
+仓库提供脚本：`scripts/dev-sync-upstream.sh`，用于：
+
+- `git fetch upstream --prune`
+- `git rebase upstream/main`（等价于“自动应用本分支的 patch”）
+- 可选：推送到 fork（rebase 后使用 `--force-with-lease`）
+- 可选：编译 `codex-rs` 的 `codex`（debug/release）
+- 可选：创建/更新符号链接（例如 `~/.local/bin/codex-dev`）
+
+交互式（推荐给人手动用）：
+
+```bash
+./scripts/dev-sync-upstream.sh
+```
+
+非交互（推荐给自动化/AI 助手调用）：
+
+```bash
+./scripts/dev-sync-upstream.sh --non-interactive --build release --link release
+```
+
+如果你希望 rebase 后把分支同步推送到 fork：
+
+```bash
+./scripts/dev-sync-upstream.sh --non-interactive --push
+```
+
+预览将要执行的命令（不做任何修改）：
+
+```bash
+./scripts/dev-sync-upstream.sh --dry-run --build release --link both --push --verify quick
+```
+
+> 注意：rebase 是“改历史”的操作，所以推送到 `origin` 时需要 `--force-with-lease`。脚本会在你确认后使用该方式推送。
+
+### 本地运行你编译的 Codex（而不是系统安装版）
+
+如果你是通过 `npm` / `brew` / GitHub Release 安装的 `codex`，那是官方发行版，不包含你本地改动。要用你改过的版本，请运行 `codex-rs` 里编译出来的二进制：
+
+- debug：`codex-rs/target/debug/codex`
+- release：`codex-rs/target/release/codex`
+
+脚本可选创建以下链接（目录默认 `~/.local/bin`）：
+
+- `codex-dev`：指向你选择的默认构建（`release` 优先）
+- `codex-dev-debug`：指向 debug
+- `codex-dev-release`：指向 release
+
+确保 `~/.local/bin` 在 `PATH` 中后，可以直接：
+
+```bash
+codex-dev --version
+codex-dev
+```
+
+### 冲突处理（rebase 失败时）
+
+当官方改动与本分支改动重叠时，`git rebase` 可能产生冲突。处理流程：
+
+1. `git status` 查看冲突文件
+2. 手动解决冲突
+3. `git add <文件...>`
+4. `git rebase --continue`
+5. 如果要放弃本次 rebase：`git rebase --abort`
+
+建议开启 `rerere`（复用冲突解决结果），这样同类冲突下次会自动套用：
+
+```bash
+git config rerere.enabled true
+```
