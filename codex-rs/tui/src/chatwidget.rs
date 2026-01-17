@@ -2459,7 +2459,7 @@ impl ChatWidget {
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
-            agent_reasoning_translation,
+            agent_reasoning_translation: AgentReasoningTranslationOrchestrator::default(),
             current_status_header: String::from("Working"),
             retry_status_header: None,
             thread_id: None,
@@ -2495,6 +2495,7 @@ impl ChatWidget {
             widget.config.features.enabled(Feature::CollaborationModes),
         );
         widget.sync_personality_command_enabled();
+        widget.update_collaboration_mode_indicator();
 
         widget
     }

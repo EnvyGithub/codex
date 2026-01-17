@@ -30,7 +30,7 @@
 建议把“启用推理译文”的最短路径固定为：
 
 - 构建/安装本 fork 的 `codex`
-- 配置 `plugins.translation.agent_reasoning.command`
+- 配置 `translation.agent_reasoning.command`
 - 先用 `scripts/translate_agent_reasoning_dummy.py` 验证链路，再换成真正的翻译器
 
 ## 上游同步策略（强烈建议）
@@ -96,7 +96,7 @@ rg -n -S "API_KEY|ACCESS_KEY|SECRET_KEY|BEGIN (RSA|OPENSSH) PRIVATE KEY|ssh-rsa|
 建议：
 
 - 检查 `docs/translation.md` 中提到的脚本文件路径都存在
-- 检查 `docs/config.md` 中提到的 `plugins` 命名空间已进入 schema（schema 只描述通用 `plugins`，不会校验 `plugins.*` 下的插件字段；翻译插件会在运行时严格解析并在未知字段时报错；细节以 `docs/translation.md` 为准）
+- 检查 `docs/config.md` 中提到的配置键已进入 schema（本 fork 已为翻译配置补齐 JsonSchema）
 
 ### 3) 最小可运行性验证
 

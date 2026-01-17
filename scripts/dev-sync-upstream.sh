@@ -23,12 +23,9 @@ usage() {
   1) git fetch upstream --prune --tags
   2) git rebase --onto <latest stable rust tag> <patch-base>
   3) 可选：push / build / link / verify（交互询问）
-
-  说明（版本对齐）：
-  - 当 upstream 选择的是 rust-v* tag 且启用了 build/verify 时，
-    脚本会临时把 codex-rs/Cargo.toml 的 workspace.package.version 写成该 tag 的版本号，
-    并备份/恢复 codex-rs/Cargo.lock，确保 `codex --version` 对应该 tag。
-  - 脚本退出会自动恢复上述文件，不把 version 变化带进补丁栈（保持 git 干净）。
+  4) 若基线为 rust-v* tag 且你启用了 build/verify：脚本会临时把 codex-rs/Cargo.toml 的
+     workspace.package.version 写成该 tag 的版本号，并备份/恢复 codex-rs/Cargo.lock，
+     确保本次编译产物的 `codex --version` 对齐该 tag；脚本退出会自动恢复，避免把版本号改动带进补丁栈。
 
 常用示例：
   # 交互式：默认对齐“最新稳定 tag”，并提示你选择是否编译/建链接/推送

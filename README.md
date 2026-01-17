@@ -1,70 +1,118 @@
-<p align="center"><code>npm i -g @openai/codex</code><br />or <code>brew install --cask codex</code></p>
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# Codex CLI（Fork：推理输出翻译插件）
 
----
+本仓库基于上游 `openai/codex`，在官方 Codex CLI 的基础上新增了一个**可选**扩展：**推理输出翻译插件（外部命令钩子）**。
 
-## Quickstart
+该扩展的目标是：允许你用**自定义外部命令**（脚本/二进制均可）把 TUI / TUI2 中的 `AgentReasoning`（例如 `Thinking` / `Analyzing` 这类推理/思考块）翻译为中文，并以“原文 + 译文”形式展示。
 
-### Installing and running Codex CLI
+## 效果预览
 
-Install globally with your preferred package manager:
+![推理译文效果预览](./.github/agent-reasoning-translation-preview.png)
 
-```shell
-# Install using npm
-npm install -g @openai/codex
+（SVG 版：`./.github/agent-reasoning-translation-preview.svg`）
+
+## 这是什么（对外说明建议）
+
+- 这是一个上游 `openai/codex` 的 fork，用于探索/维护额外能力。
+- 这是一个**非官方**仓库，与 OpenAI 官方无隶属关系。
+- 本 fork **不内置任何在线翻译 SDK/服务**，翻译逻辑完全由你配置的外部命令实现（便于替换、便于合规、便于私有化）。
+- 未启用翻译配置时，行为与上游保持一致（不改变默认输出）。
+- 常见终端/WSL 相关问题排查：`docs/troubleshooting.md`。
+- 目前主要在 **Windows 11 + WSL2** 环境开发/测试；其他环境尚未系统验证（欢迎反馈与 PR）。
+- 问题反馈：请优先在本仓库提 issue；若确认/怀疑为上游问题（`openai/codex`），请附上游 issue 链接（或你已检索的关键词与复现步骤），便于跟踪与同步修复。
+
+## 快速开始：启用“推理译文”（TUI/TUI2）
+
+### 1) 安装/构建本 fork 的 `codex`
+
+如果你只是想使用官方 Codex CLI，请直接使用上游在 README 中提供的 npm / brew 安装方式。
+
+如果你想使用本 fork 的“推理输出翻译插件”，需要运行**本 fork 构建出来的** `codex` 可执行文件（因为该能力尚不在上游发行版里）。
+
+从源码构建（示例）：
+
+```bash
+git clone https://github.com/EnvyGithub/codex.git
+cd codex/codex-rs
+cargo build
 ```
 
-```shell
-# Install using Homebrew
-brew install --cask codex
+运行（示例）：
+
+```bash
+cargo run --bin codex -- "explain this codebase to me"
 ```
 
-Then simply run `codex` to get started.
+更完整的构建依赖与命令说明见：
 
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
+- `docs/install.md`（上游通用构建说明）
 
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
+### 2) 配置翻译器（`~/.codex/config.toml`）
 
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
+> **⚠️ 隐私提示**：推理内容可能包含代码片段、文件路径、命令等敏感信息。
+>
+> 使用联网翻译服务前，请确保：
+>
+> - 翻译服务提供商符合你的合规与隐私要求
+> - 或使用本地翻译器（离线模型/内网服务）避免数据出网
 
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
+在你的 `~/.codex/config.toml` 中加入（示例）：
 
 ```toml
-[plugins.translation.agent_reasoning]
+[translation.agent_reasoning]
 command = ["python3", "/path/to/translate_agent_reasoning_dummy.py"]
 timeout_ms = 2000
 ui_max_wait_ms = 5000
 ```
 
-</details>
-
-### Using Codex with your ChatGPT plan
-
-> 兼容说明：旧路径 `[translation.agent_reasoning]` 仍可用但已弃用（启动会 warning）；同一层级（root 或同一个 profile）新旧配置不能共存（会直接报错并提示迁移）。
+- `command`：外部翻译器命令（argv 数组）
+- `timeout_ms`：外部命令执行超时（毫秒）
+- `ui_max_wait_ms`：UI 对齐等待上限（毫秒），用于尽量保证“译文紧跟原文”
 
 详细说明见：`docs/translation.md`。
 
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Team, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
+## 编写你自己的翻译器（外部命令插件）
 
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
+你需要实现一个“从 stdin 读 JSON、向 stdout 写 JSON”的可执行程序即可：
 
-## Docs
+- **输入（stdin）**：翻译请求 JSON（包含 `text`、`format`、`kind` 等字段）
+- **输出（stdout）**：翻译结果 JSON（只输出译文本体，不要额外解释）
 
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
+协议与字段定义见：`docs/translation.md` 的 “外部翻译器协议（stdin / stdout JSON）” 章节。
 
-This repository is licensed under the [Apache-2.0 License](LICENSE).
+建议直接从最小示例开始：
+
+- `scripts/translate_agent_reasoning_dummy.py`：离线 dummy（不做真实翻译，只验证链路）
+
+如果你要做联网翻译：
+
+- `scripts/translate_agent_reasoning_openai_compatible.py`：OpenAI / OpenAI 兼容服务示例（无第三方依赖）
+- `scripts/translate_agent_reasoning_gemini.py`：Gemini 示例（无第三方依赖）
+
+## 安全与隐私
+
+推理内容可能包含路径、代码片段、命令等信息。是否“出网翻译”由你的外部翻译器决定：
+
+- 需要联网：请确保翻译服务/代理满足你的合规与隐私要求。
+- 不希望出网：请使用本地翻译器（例如本地模型、离线词典、内网服务等）。
+
+## 与上游同步（维护者）
+
+本仓库包含一个用于同步上游并 rebase 的脚本：
+
+- `scripts/dev-sync-upstream.sh`
+
+它的定位是“帮助维护者把本 fork 的改动持续搬运到**上游稳定发布基线**上”，默认会对齐最新稳定 tag（`rust-vX.Y.Z`），并提供可选的 build/link/verify 能力。若你需要跟随上游开发分支，可显式使用 `--upstream upstream/main`。具体用法见脚本内置 `--help`。
+
+推荐的一键命令（对齐最新稳定 tag + 构建 debug/release + 建软链 + 快速验证）：
+
+```bash
+./scripts/dev-sync-upstream.sh --non-interactive --build both --link both --verify quick
+```
+
+如果你准备把仓库公开，建议先按发布清单自检：
+
+- `docs/public-repo.md`
+
+## 许可证
+
+本仓库使用 Apache-2.0 许可证，见 `LICENSE`。

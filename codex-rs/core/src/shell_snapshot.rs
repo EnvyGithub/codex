@@ -655,9 +655,25 @@ mod tests {
         use tokio::time::Instant;
         use tokio::time::sleep;
 
+        fn quote_posix_single(s: &str) -> String {
+            // 最小化的 POSIX 单引号转义：用于把任意路径安全嵌入 `sh -c` 脚本字符串中。
+            // 原理：关闭单引号、插入一个被转义的单引号、再重新打开单引号：
+            //   'foo'"'"'bar'
+            let mut out = String::with_capacity(s.len() + 2);
+            out.push('\'');
+            for ch in s.chars() {
+                if ch == '\'' {
+                    out.push_str("'\"'\"'");
+                } else {
+                    out.push(ch);
+                }
+            }
+            out.push('\'');
+            out
+        }
+
         let dir = tempdir()?;
         let pid_path = dir.path().join("pid");
-        let script = format!("echo $$ > \"{}\"; sleep 30", pid_path.display());
 
         let shell = Shell {
             shell_type: ShellType::Sh,
@@ -665,6 +681,8 @@ mod tests {
             shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
         };
 
+        let pid_path_quoted = quote_posix_single(&pid_path.to_string_lossy());
+        let script = format!("echo $$ > {pid_path_quoted}; sleep 30");
         let err = run_script_with_timeout(&shell, &script, Duration::from_secs(1), true)
             .await
             .expect_err("snapshot shell should time out");

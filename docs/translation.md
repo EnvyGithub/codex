@@ -2,6 +2,64 @@
 
 本分支为 Codex CLI 增加了一个**可选**的翻译扩展点：通过 `config.toml` 指定一个“外部可执行命令”作为翻译器，把 TUI/TUI2 中的推理相关输出（`AgentReasoning`）从英文翻译成中文，并以“双语”形式显示。
 
+> 重要提醒：通过 `npm` / `brew` 安装的 `codex` 是上游官方发行版，**不包含**本 fork 的翻译插件。要启用翻译，请运行本仓库构建/发布的 `codex` 二进制（见 `README.md` / `README.en.md`）。
+
+## 快速上手：写一个最小翻译器
+
+如果你只想先把链路跑通（不引入任何第三方 SDK/依赖），可以用下面这种最小实现作为起点：
+
+要点：
+
+- 翻译器从 **stdin** 读取一份 JSON 请求，向 **stdout** 输出一份 JSON 响应。
+- **stdout 必须只输出 JSON**（不要打印日志、不要加解释；日志请写到 stderr）。
+- 正常成功请返回 0；失败请返回非 0，并尽量把原因写到 stderr（便于 UI 显示错误）。
+
+Python（仅标准库）示例：
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from __future__ import annotations
+
+import json
+import sys
+
+
+def main() -> int:
+    req = json.load(sys.stdin)
+    if req.get("schema_version", 1) != 1:
+        sys.stderr.write("unsupported_schema_version\n")
+        return 2
+
+    text = req.get("text", "")
+    if not isinstance(text, str):
+        text = str(text)
+
+    # TODO: 在这里实现你的翻译逻辑（联网/离线均可）。
+    translated = "（示例译文，占位）\\n" + text
+
+    resp = {"schema_version": 1, "text": translated}
+    sys.stdout.write(json.dumps(resp, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+你也可以直接复用仓库内的离线 dummy 脚本（同样只依赖标准库）：
+
+- `scripts/translate_agent_reasoning_dummy.py`
+
+手动自测（示例）：
+
+```bash
+python3 /path/to/your_translator.py <<'JSON'
+{"schema_version":1,"kind":"agent_reasoning_body","format":"markdown","source_language":"en","target_language":"zh-CN","text":"**Thinking**\\nHello world"}
+JSON
+```
+
 ## 设计目标
 
 - **不污染本体依赖**：Codex 不内置任何在线翻译 SDK/服务，避免隐私/合规风险与依赖耦合。
@@ -96,7 +154,7 @@ Codex 会把翻译请求以 **JSON** 写入翻译器的 `stdin`，翻译器需�
 - `schema_version`: 当前协议版本（固定为 `1`）
 - `kind`: 请求类型
   - `agent_reasoning_body`：推理正文（可能包含 Markdown；**默认会包含开头的 `**标题**`**，用于一次翻译同时得到主题与正文）
-  - `agent_reasoning_title`：推理标题（通常很短，例如 `Thinking`，**预留/可选**；当前 UI 默认不再单独调用以减少一次翻译成本）
+  - `agent_reasoning_title`：推理标题（**预留字段，当前未使用**；UI 从 body 译文中提取标题以减少一次翻译成本）
 - `format`: `plain` 或 `markdown`
 - `source_language`: 当前固定为 `en`
 - `target_language`: 当前固定为 `zh-CN`
@@ -243,3 +301,108 @@ Codex 自身已经有两个与推理显示有关的配置键（见官方配置�
 
 - 如果你需要联网翻译：请确保你的翻译服务/代理满足你的合规要求。
 - 如果你不希望出网：请使用本地翻译器（例如本地模型或离线词典）。
+
+## 开发与升级（同步官方最新版 + 本地构建）
+
+本分支是在官方仓库 `openai/codex` 的源码上做的功能扩展。官方 `main` 更新很快；为降低“跟着开发分支跑”的不确定性，建议把“对齐上游稳定发布 tag + 重打补丁 + 重新构建”固化为一套可重复流程，避免每次手动操作出错。
+
+### 远端约定（推荐）
+
+推荐使用这两个 remote：
+
+- `upstream`：官方仓库（`openai/codex`），只用于 `fetch`/对齐上游
+- `origin`：你的 fork（私有/公开均可），用于 `push`/备份/CI
+
+检查：
+
+```bash
+git remote -v
+```
+
+为了避免误推到官方仓库，建议禁用 `upstream` 的 push：
+
+```bash
+git remote set-url --push upstream DISABLED
+```
+
+> 说明：这不会影响 `fetch upstream`，只会阻止 `git push upstream ...`。
+
+### 一键同步脚本（推荐）
+
+仓库提供脚本：`scripts/dev-sync-upstream.sh`，用于把本 fork 的补丁栈重打到上游基线（等价于“自动打补丁”），并可选执行 build/link/verify/push。
+
+默认行为会对齐“上游最新稳定发布 tag（`rust-vX.Y.Z`）”，以减少跟随 `upstream/main` 带来的不确定性；如需跟随开发分支，可显式指定 `--upstream upstream/main`。
+
+交互式（推荐给人手动用）：
+
+```bash
+./scripts/dev-sync-upstream.sh
+```
+
+非交互（推荐给自动化/AI 助手调用）：
+
+```bash
+./scripts/dev-sync-upstream.sh --non-interactive --build both --link both --verify quick
+```
+
+如果你希望锁定到某个发布版本（例如 `rust-v0.87.0`）：
+
+```bash
+./scripts/dev-sync-upstream.sh --non-interactive --upstream rust-v0.87.0 --build both --link both --verify quick
+```
+
+如需跟随上游开发分支（可能出现 `0.0.0` 这类开发版版本号属于正常现象）：
+
+```bash
+./scripts/dev-sync-upstream.sh --non-interactive --upstream upstream/main --build release
+```
+
+如果你希望 rebase 后把分支同步推送到 fork：
+
+```bash
+./scripts/dev-sync-upstream.sh --non-interactive --push
+```
+
+预览将要执行的命令（不做任何修改）：
+
+```bash
+./scripts/dev-sync-upstream.sh --dry-run --build release --link both --push --verify quick
+```
+
+> 注意：rebase 是“改历史”的操作，所以推送到 `origin` 时需要 `--force-with-lease`。脚本会在你确认后使用该方式推送。
+
+### 本地运行你编译的 Codex（而不是系统安装版）
+
+如果你是通过 `npm` / `brew` / GitHub Release 安装的 `codex`，那是官方发行版，不包含你本地改动。要用你改过的版本，请运行 `codex-rs` 里编译出来的二进制：
+
+- debug：`codex-rs/target/debug/codex`
+- release：`codex-rs/target/release/codex`
+
+脚本可选创建以下链接（目录默认 `~/.local/bin`）：
+
+- `codex-dev`：指向你选择的默认构建（`release` 优先）
+- `codex-dev-debug`：指向 debug
+- `codex-dev-release`：指向 release
+
+确保 `~/.local/bin` 在 `PATH` 中后，可以直接：
+
+```bash
+codex-dev --version
+codex-dev
+```
+
+### 冲突处理（rebase 失败时）
+
+当官方改动与本分支改动重叠时，`git rebase` 可能产生冲突。处理流程：
+
+1. `git status` 查看冲突文件
+2. 手动解决冲突
+3. `git add <文件...>`
+4. `git rebase --continue`
+5. 如果要放弃本次 rebase：`git rebase --abort`
+
+建议开启 `rerere`（复用冲突解决结果），这样同类冲突下次会自动套用：
+
+```bash
+git config rerere.enabled true
+```
