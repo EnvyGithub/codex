@@ -377,25 +377,82 @@ impl AgentReasoningTranslationCell {
     }
 
     fn lines_with_joiners(&self, width: u16) -> TranscriptLinesWithJoiners {
-        let mut md_lines: Vec<Line<'static>> = Vec::new();
-        append_markdown(
-            &self.content,
-            Some((width as usize).saturating_sub(4).max(1)),
-            &mut md_lines,
-        );
-
         let translation_style = Style::default().dim();
-        let styled_md_lines = md_lines
+        let logical_lines = crate::markdown_render::render_markdown_logical_lines(&self.content)
             .into_iter()
             .map(|mut line| {
-                line.spans = line
-                    .spans
-                    .into_iter()
-                    .map(|span| span.patch_style(translation_style))
-                    .collect();
+                line.line_style = line.line_style.patch(translation_style);
                 line
             })
             .collect::<Vec<_>>();
+
+        let wrap_logical_lines =
+            |logical_lines: &[crate::markdown_render::MarkdownLogicalLine],
+             initial_prefix: Line<'static>,
+             subsequent_prefix: Line<'static>|
+             -> TranscriptLinesWithJoiners {
+                if width == 0 {
+                    return TranscriptLinesWithJoiners {
+                        lines: Vec::new(),
+                        joiner_before: Vec::new(),
+                    };
+                }
+
+                let mut out_lines: Vec<Line<'static>> = Vec::new();
+                let mut joiner_before: Vec<Option<String>> = Vec::new();
+
+                let mut at_cell_start = true;
+                for logical in logical_lines {
+                    let prefix_first_visual_line: Line<'static> = if at_cell_start {
+                        initial_prefix.clone()
+                    } else {
+                        subsequent_prefix.clone()
+                    };
+                    let prefix_continuation: Line<'static> = subsequent_prefix.clone();
+
+                    let compose_indent =
+                        |gutter: &Line<'static>, md_indent: &Line<'static>| -> Line<'static> {
+                            let mut spans = gutter.spans.clone();
+                            spans.extend(md_indent.spans.iter().cloned());
+                            Line::from(spans)
+                        };
+
+                    // 预格式化行（例如 fenced code）不做软换行，保持 whitespace 稳定，便于复制。
+                    if logical.is_preformatted {
+                        let mut spans = prefix_first_visual_line.spans.clone();
+                        spans.extend(logical.initial_indent.spans.iter().cloned());
+                        spans.extend(logical.content.spans.iter().cloned());
+                        out_lines.push(Line::from(spans).style(logical.line_style));
+                        joiner_before.push(None);
+                        at_cell_start = false;
+                        continue;
+                    }
+
+                    let opts = RtOptions::new(width as usize)
+                        .initial_indent(compose_indent(
+                            &prefix_first_visual_line,
+                            &logical.initial_indent,
+                        ))
+                        .subsequent_indent(compose_indent(
+                            &prefix_continuation,
+                            &logical.subsequent_indent,
+                        ));
+
+                    let (wrapped, wrapped_joiners) =
+                        crate::wrapping::word_wrap_line_with_joiners(&logical.content, opts);
+                    for (visual, joiner) in wrapped.into_iter().zip(wrapped_joiners) {
+                        out_lines.push(line_to_static(&visual).style(logical.line_style));
+                        joiner_before.push(joiner);
+                    }
+
+                    at_cell_start = false;
+                }
+
+                TranscriptLinesWithJoiners {
+                    lines: out_lines,
+                    joiner_before,
+                }
+            };
 
         if self.is_error {
             let mut lines: Vec<Line<'static>> = Vec::new();
@@ -412,15 +469,9 @@ impl AgentReasoningTranslationCell {
             lines.push(Line::from(header));
             joiner_before.push(None);
 
-            let (wrapped, wrapped_joiners) = crate::wrapping::word_wrap_lines_with_joiners(
-                &styled_md_lines,
-                RtOptions::new(width as usize)
-                    .initial_indent("    ".into())
-                    .subsequent_indent("    ".into()),
-            );
-
-            lines.extend(wrapped);
-            joiner_before.extend(wrapped_joiners);
+            let wrapped = wrap_logical_lines(&logical_lines, "    ".into(), "    ".into());
+            lines.extend(wrapped.lines);
+            joiner_before.extend(wrapped.joiner_before);
 
             return TranscriptLinesWithJoiners {
                 lines,
@@ -430,17 +481,7 @@ impl AgentReasoningTranslationCell {
 
         // 选项 B：成功时不额外显示 “└ 译文” 标题行，
         // 直接把译文正文作为子节点输出，避免比原文多一行“标签”。
-        let (lines, joiner_before) = crate::wrapping::word_wrap_lines_with_joiners(
-            &styled_md_lines,
-            RtOptions::new(width as usize)
-                .initial_indent("  └ ".dim().into())
-                .subsequent_indent("    ".into()),
-        );
-
-        TranscriptLinesWithJoiners {
-            lines,
-            joiner_before,
-        }
+        wrap_logical_lines(&logical_lines, "  └ ".dim().into(), "    ".into())
     }
 }
 
@@ -1979,6 +2020,24 @@ mod tests {
 
     fn render_transcript(cell: &dyn HistoryCell) -> Vec<String> {
         render_lines(&cell.transcript_lines(u16::MAX))
+    }
+
+    #[test]
+    fn agent_reasoning_translation_cell_keeps_fenced_code_lines_unwrapped() {
+        let code_line = format!("CODESTART {} CODEEND", "x".repeat(120));
+        let cell = AgentReasoningTranslationCell::new(
+            None,
+            format!("**思考中**\n\n```sh\n{code_line}\n```\n"),
+            false,
+        );
+
+        let lines = render_transcript(&cell);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("CODESTART") && l.contains("CODEEND")),
+            "expected a single visual line to contain both CODESTART and CODEEND; got: {lines:#?}"
+        );
     }
 
     /// Remove a single leading markdown blockquote marker (`> `) from `line`.

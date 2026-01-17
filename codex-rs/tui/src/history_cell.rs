@@ -318,23 +318,13 @@ impl AgentReasoningTranslationCell {
                 header.push(format!("({title})").dim());
             }
             out.push(Line::from(header));
-            out.extend(word_wrap_lines(
-                &styled_md_lines,
-                RtOptions::new(width as usize)
-                    .initial_indent("    ".into())
-                    .subsequent_indent("    ".into()),
-            ));
+            out.extend(prefix_lines(styled_md_lines, "    ".into(), "    ".into()));
             return out;
         }
 
         // 选项 B：成功时不额外显示 “└ 译文” 标题行，
         // 直接把译文正文作为子节点输出，避免比原文多一行“标签”。
-        word_wrap_lines(
-            &styled_md_lines,
-            RtOptions::new(width as usize)
-                .initial_indent("  └ ".dim().into())
-                .subsequent_indent("    ".into()),
-        )
+        prefix_lines(styled_md_lines, "  └ ".dim(), "    ".into())
     }
 }
 
@@ -1885,6 +1875,24 @@ mod tests {
 
     fn render_transcript(cell: &dyn HistoryCell) -> Vec<String> {
         render_lines(&cell.transcript_lines(u16::MAX))
+    }
+
+    #[test]
+    fn agent_reasoning_translation_cell_keeps_fenced_code_lines_unwrapped() {
+        let code_line = format!("CODESTART {} CODEEND", "x".repeat(120));
+        let cell = AgentReasoningTranslationCell::new(
+            None,
+            format!("**思考中**\n\n```sh\n{code_line}\n```\n"),
+            false,
+        );
+
+        let lines = render_transcript(&cell);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("CODESTART") && l.contains("CODEEND")),
+            "expected a single visual line to contain both CODESTART and CODEEND; got: {lines:#?}"
+        );
     }
 
     #[test]
