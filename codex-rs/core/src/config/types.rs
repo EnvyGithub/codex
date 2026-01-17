@@ -308,14 +308,16 @@ pub enum HistoryPersistence {
 // ===== 翻译配置 =====
 
 /// 翻译相关配置（外部命令插件）。
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct TranslationToml {
     /// `AgentReasoning`（推理）翻译配置。
     pub agent_reasoning: Option<AgentReasoningTranslationToml>,
 }
 
 /// `AgentReasoning`（推理）翻译配置：通过外部命令将推理英文内容翻译成中文。
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct AgentReasoningTranslationToml {
     /// 外部翻译器命令（argv）。
     ///
