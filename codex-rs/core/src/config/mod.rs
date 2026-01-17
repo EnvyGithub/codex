@@ -1,6 +1,8 @@
 use crate::auth::AuthCredentialsStoreMode;
 use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
+use crate::config::types::AgentReasoningTranslationConfig;
+use crate::config::types::DEFAULT_AGENT_REASONING_TRANSLATION_TIMEOUT_MS;
 use crate::config::types::DEFAULT_OTEL_ENVIRONMENT;
 use crate::config::types::History;
 use crate::config::types::McpServerConfig;
@@ -15,6 +17,7 @@ use crate::config::types::SandboxWorkspaceWrite;
 use crate::config::types::ShellEnvironmentPolicy;
 use crate::config::types::ShellEnvironmentPolicyToml;
 use crate::config::types::SkillsConfig;
+use crate::config::types::TranslationToml;
 use crate::config::types::Tui;
 use crate::config::types::UriBasedFileOpener;
 use crate::config_loader::ConfigLayerStack;
@@ -155,6 +158,11 @@ pub struct Config {
     /// When set to `true`, `AgentReasoningRawContentEvent` events will be shown in the UI/output.
     /// Defaults to `false`.
     pub show_raw_agent_reasoning: bool,
+
+    /// `AgentReasoning`（推理）翻译配置（外部命令插件）。
+    ///
+    /// 未配置时为 `None`，行为与上游保持一致（不触发翻译、不影响输出）。
+    pub agent_reasoning_translation: Option<AgentReasoningTranslationConfig>,
 
     /// User-provided instructions from AGENTS.md.
     pub user_instructions: Option<String>,
@@ -874,6 +882,9 @@ pub struct ConfigToml {
     /// Defaults to `false`.
     pub show_raw_agent_reasoning: Option<bool>,
 
+    /// 翻译相关配置（外部命令插件）。
+    pub translation: Option<TranslationToml>,
+
     pub model_reasoning_effort: Option<ReasoningEffort>,
     pub model_reasoning_summary: Option<ReasoningSummary>,
     /// Optional verbosity control for GPT-5 models (Responses API `text.verbosity`).
@@ -1438,6 +1449,34 @@ impl Config {
 
         let model = model.or(config_profile.model).or(cfg.model);
 
+        let agent_reasoning_translation = {
+            let global = cfg
+                .translation
+                .as_ref()
+                .and_then(|translation| translation.agent_reasoning.as_ref());
+            let profile = config_profile
+                .translation
+                .as_ref()
+                .and_then(|translation| translation.agent_reasoning.as_ref());
+
+            let command = profile
+                .and_then(|settings| settings.command.clone())
+                .or_else(|| global.and_then(|settings| settings.command.clone()));
+
+            let timeout_ms = profile
+                .and_then(|settings| settings.timeout_ms)
+                .or_else(|| global.and_then(|settings| settings.timeout_ms))
+                .unwrap_or(DEFAULT_AGENT_REASONING_TRANSLATION_TIMEOUT_MS);
+
+            match command {
+                Some(command) if !command.is_empty() => Some(AgentReasoningTranslationConfig {
+                    command,
+                    timeout: std::time::Duration::from_millis(timeout_ms),
+                }),
+                _ => None,
+            }
+        };
+
         let compact_prompt = compact_prompt.or(cfg.compact_prompt).and_then(|value| {
             let trimmed = value.trim();
             if trimmed.is_empty() {
@@ -1550,6 +1589,7 @@ impl Config {
                 .show_raw_agent_reasoning
                 .or(show_raw_agent_reasoning)
                 .unwrap_or(false),
+            agent_reasoning_translation,
             model_reasoning_effort: config_profile
                 .model_reasoning_effort
                 .or(cfg.model_reasoning_effort),
@@ -1833,6 +1873,94 @@ persistence = "none"
             }),
             history_no_persistence_cfg.history
         );
+    }
+
+    #[test]
+    fn agent_reasoning_translation_disabled_by_default() -> std::io::Result<()> {
+        let cfg = ConfigToml::default();
+        let cwd_temp_dir = TempDir::new()?;
+        let cwd = cwd_temp_dir.path().to_path_buf();
+        // 测试中避免向上扫描 AGENTS.md（以及其它项目文档）。
+        std::fs::write(cwd.join(".git"), "gitdir: fake\n")?;
+
+        let codex_home = TempDir::new()?;
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                cwd: Some(cwd),
+                ..Default::default()
+            },
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(config.agent_reasoning_translation, None);
+        Ok(())
+    }
+
+    #[test]
+    fn agent_reasoning_translation_loads_from_toml() -> std::io::Result<()> {
+        let toml = r#"
+[translation.agent_reasoning]
+command = ["python3", "/tmp/translate.py"]
+timeout_ms = 1234
+"#;
+        let cfg: ConfigToml = toml::from_str(toml).expect("TOML deserialization should succeed");
+
+        let cwd_temp_dir = TempDir::new()?;
+        let cwd = cwd_temp_dir.path().to_path_buf();
+        // 测试中避免向上扫描 AGENTS.md（以及其它项目文档）。
+        std::fs::write(cwd.join(".git"), "gitdir: fake\n")?;
+
+        let codex_home = TempDir::new()?;
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                cwd: Some(cwd),
+                ..Default::default()
+            },
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(
+            config.agent_reasoning_translation,
+            Some(AgentReasoningTranslationConfig {
+                command: vec!["python3".to_string(), "/tmp/translate.py".to_string()],
+                timeout: Duration::from_millis(1234),
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn agent_reasoning_translation_profile_overrides_global() -> std::io::Result<()> {
+        let toml = r#"
+[translation.agent_reasoning]
+command = ["python3", "/tmp/translate.py"]
+timeout_ms = 1234
+
+[profiles.no_translate.translation.agent_reasoning]
+command = []
+"#;
+        let cfg: ConfigToml = toml::from_str(toml).expect("TOML deserialization should succeed");
+
+        let cwd_temp_dir = TempDir::new()?;
+        let cwd = cwd_temp_dir.path().to_path_buf();
+        // 测试中避免向上扫描 AGENTS.md（以及其它项目文档）。
+        std::fs::write(cwd.join(".git"), "gitdir: fake\n")?;
+
+        let codex_home = TempDir::new()?;
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                cwd: Some(cwd),
+                config_profile: Some("no_translate".to_string()),
+                ..Default::default()
+            },
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(config.agent_reasoning_translation, None);
+        Ok(())
     }
 
     #[test]
@@ -3728,6 +3856,7 @@ model_verbosity = "high"
                 codex_linux_sandbox_exe: None,
                 hide_agent_reasoning: false,
                 show_raw_agent_reasoning: false,
+                agent_reasoning_translation: None,
                 model_reasoning_effort: Some(ReasoningEffort::High),
                 model_reasoning_summary: ReasoningSummary::Detailed,
                 model_supports_reasoning_summaries: None,
@@ -3811,6 +3940,7 @@ model_verbosity = "high"
             codex_linux_sandbox_exe: None,
             hide_agent_reasoning: false,
             show_raw_agent_reasoning: false,
+            agent_reasoning_translation: None,
             model_reasoning_effort: None,
             model_reasoning_summary: ReasoningSummary::default(),
             model_supports_reasoning_summaries: None,
@@ -3909,6 +4039,7 @@ model_verbosity = "high"
             codex_linux_sandbox_exe: None,
             hide_agent_reasoning: false,
             show_raw_agent_reasoning: false,
+            agent_reasoning_translation: None,
             model_reasoning_effort: None,
             model_reasoning_summary: ReasoningSummary::default(),
             model_supports_reasoning_summaries: None,
@@ -3993,6 +4124,7 @@ model_verbosity = "high"
             codex_linux_sandbox_exe: None,
             hide_agent_reasoning: false,
             show_raw_agent_reasoning: false,
+            agent_reasoning_translation: None,
             model_reasoning_effort: Some(ReasoningEffort::High),
             model_reasoning_summary: ReasoningSummary::Detailed,
             model_supports_reasoning_summaries: None,

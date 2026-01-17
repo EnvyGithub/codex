@@ -33,3 +33,9 @@ The generated JSON Schema for `config.toml` lives at `codex-rs/core/config.schem
 Codex stores "do not show again" flags for some UI prompts under the `[notice]` table.
 
 Ctrl+C/Ctrl+D quitting uses a ~1 second double-press hint (`ctrl + c again to quit`).
+
+## 推理输出翻译（外部命令插件）
+
+本分支新增了一个**可选**的外部翻译命令钩子，用于把 `AgentReasoning`（TUI 里的 “Thinking/Analyzing…” 推理摘要）从英文翻译为中文，并以“原文 + 译文”方式展示。
+
+- 详细说明与插件协议：`docs/translation.md`
