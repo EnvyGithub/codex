@@ -387,6 +387,14 @@
         }
       ]
     },
+    "translation": {
+      "description": "翻译相关配置（外部命令插件）。",
+      "allOf": [
+        {
+          "$ref": "#/definitions/TranslationToml"
+        }
+      ]
+    },
     "tui": {
       "description": "Collection of settings that are specific to the TUI.",
       "allOf": [
@@ -413,6 +421,32 @@
     "AbsolutePathBuf": {
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
+    },
+    "AgentReasoningTranslationToml": {
+      "description": "`AgentReasoning`（推理）翻译配置：通过外部命令将推理英文内容翻译成中文。",
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "外部翻译器命令（argv）。\n\n- 未设置：翻译功能关闭（保持现有行为） - 空数组：显式关闭（用于 profile 覆盖全局配置）",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout_ms": {
+          "description": "翻译器调用超时（毫秒）。\n\n未设置时使用默认值（见 [`DEFAULT_AGENT_REASONING_TRANSLATION_TIMEOUT_MS`]）。",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "ui_max_wait_ms": {
+          "description": "UI 对齐等待上限（毫秒）。\n\n说明： - 该值仅影响 TUI/TUI2 的“译文紧跟原文”对齐策略（barrier）等待多久； - 不影响外部翻译器进程本身的执行超时（见 [`Self::timeout_ms`]）； - 未设置时使用默认值（见 [`DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS`]）。",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
     },
     "AltScreenMode": {
       "description": "Controls whether the TUI uses the terminal's alternate screen buffer.\n\n**Background:** The alternate screen buffer provides a cleaner fullscreen experience without polluting the terminal's scrollback history. However, it conflicts with terminal multiplexers like Zellij that strictly follow the xterm specification, which defines that alternate screen buffers should not have scrollback.\n\n**Zellij's behavior:** Zellij intentionally disables scrollback in alternate screen mode (see https://github.com/zellij-org/zellij/pull/1032) to comply with the xterm spec. This is by design and not configurable in Zellij—there is no option to enable scrollback in alternate screen mode.\n\n**Solution:** This setting provides a pragmatic workaround: - `auto` (default): Automatically detect the terminal multiplexer. If running in Zellij, disable alternate screen to preserve scrollback. Enable it everywhere else. - `always`: Always use alternate screen mode (original behavior before this fix). - `never`: Never use alternate screen mode. Runs in inline mode, preserving scrollback in all multiplexers.\n\nThe CLI flag `--no-alt-screen` can override this setting at runtime.",
@@ -642,6 +676,14 @@
         },
         "tools_web_search": {
           "type": "boolean"
+        },
+        "translation": {
+          "description": "翻译相关配置（可在 profile 内覆盖全局配置）。",
+          "allOf": [
+            {
+              "$ref": "#/definitions/TranslationToml"
+            }
+          ]
         },
         "web_search": {
           "$ref": "#/definitions/WebSearchMode"
@@ -1299,6 +1341,21 @@
         "web_search": {
           "default": null,
           "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "TranslationToml": {
+      "description": "翻译相关配置（外部命令插件）。",
+      "type": "object",
+      "properties": {
+        "agent_reasoning": {
+          "description": "`AgentReasoning`（推理）翻译配置。",
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentReasoningTranslationToml"
+            }
+          ]
         }
       },
       "additionalProperties": false

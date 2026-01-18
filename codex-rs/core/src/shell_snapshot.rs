@@ -354,8 +354,6 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::ffi::OsStrExt;
     #[cfg(target_os = "linux")]
-    use std::os::unix::fs::PermissionsExt;
-    #[cfg(target_os = "linux")]
     use std::process::Command as StdCommand;
 
     use tempfile::tempdir;
@@ -424,30 +422,40 @@ mod tests {
         use tokio::time::Instant;
         use tokio::time::sleep;
 
-        let dir = tempdir()?;
-        let shell_path = dir.path().join("hanging-shell.sh");
-        let pid_path = dir.path().join("pid");
+        fn quote_posix_single(s: &str) -> String {
+            // 最小化的 POSIX 单引号转义：用于把任意路径安全嵌入 `sh -c` 脚本字符串中。
+            // 原理：关闭单引号、插入一个被转义的单引号、再重新打开单引号：
+            //   'foo'"'"'bar'
+            let mut out = String::with_capacity(s.len() + 2);
+            out.push('\'');
+            for ch in s.chars() {
+                if ch == '\'' {
+                    out.push_str("'\"'\"'");
+                } else {
+                    out.push(ch);
+                }
+            }
+            out.push('\'');
+            out
+        }
 
-        let script = format!(
-            "#!/bin/sh\n\
-             echo $$ > {}\n\
-             sleep 30\n",
-            pid_path.display()
-        );
-        fs::write(&shell_path, script).await?;
-        let mut permissions = std::fs::metadata(&shell_path)?.permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&shell_path, permissions)?;
+        let dir = tempdir()?;
+        let pid_path = dir.path().join("pid");
 
         let shell = Shell {
             shell_type: ShellType::Sh,
-            shell_path,
+            shell_path: PathBuf::from("/bin/sh"),
             shell_snapshot: None,
         };
 
-        let err = run_shell_script_with_timeout(&shell, "ignored", Duration::from_millis(500))
-            .await
-            .expect_err("snapshot shell should time out");
+        let pid_path_quoted = quote_posix_single(&pid_path.to_string_lossy());
+        let err = run_shell_script_with_timeout(
+            &shell,
+            &format!("echo $$ > {pid_path_quoted}; sleep 30"),
+            Duration::from_millis(500),
+        )
+        .await
+        .expect_err("snapshot shell should time out");
         assert!(
             err.to_string().contains("timed out"),
             "expected timeout error, got {err:?}"
