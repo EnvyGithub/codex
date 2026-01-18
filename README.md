@@ -6,7 +6,9 @@
 
 ## 效果预览
 
-![推理译文效果预览](./.github/agent-reasoning-translation-preview.svg)
+![推理译文效果预览](./.github/agent-reasoning-translation-preview.png)
+
+（SVG 版：`./.github/agent-reasoning-translation-preview.svg`）
 
 ## 这是什么（对外说明建议）
 
