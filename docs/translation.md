@@ -2,6 +2,62 @@
 
 本分支为 Codex CLI 增加了一个**可选**的翻译扩展点：通过 `config.toml` 指定一个“外部可执行命令”作为翻译器，把 TUI/TUI2 中的推理相关输出（`AgentReasoning`）从英文翻译成中文，并以“双语”形式显示。
 
+## 快速上手：写一个最小翻译器
+
+如果你只想先把链路跑通（不引入任何第三方 SDK/依赖），可以用下面这种最小实现作为起点：
+
+要点：
+
+- 翻译器从 **stdin** 读取一份 JSON 请求，向 **stdout** 输出一份 JSON 响应。
+- **stdout 必须只输出 JSON**（不要打印日志、不要加解释；日志请写到 stderr）。
+- 正常成功请返回 0；失败请返回非 0，并尽量把原因写到 stderr（便于 UI 显示错误）。
+
+Python（仅标准库）示例：
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from __future__ import annotations
+
+import json
+import sys
+
+
+def main() -> int:
+    req = json.load(sys.stdin)
+    if req.get("schema_version", 1) != 1:
+        sys.stderr.write("unsupported_schema_version\n")
+        return 2
+
+    text = req.get("text", "")
+    if not isinstance(text, str):
+        text = str(text)
+
+    # TODO: 在这里实现你的翻译逻辑（联网/离线均可）。
+    translated = "（示例译文，占位）\\n" + text
+
+    resp = {"schema_version": 1, "text": translated}
+    sys.stdout.write(json.dumps(resp, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+你也可以直接复用仓库内的离线 dummy 脚本（同样只依赖标准库）：
+
+- `scripts/translate_agent_reasoning_dummy.py`
+
+手动自测（示例）：
+
+```bash
+python3 /path/to/your_translator.py <<'JSON'
+{"schema_version":1,"kind":"agent_reasoning_body","format":"markdown","source_language":"en","target_language":"zh-CN","text":"**Thinking**\\nHello world"}
+JSON
+```
+
 ## 设计目标
 
 - **不污染本体依赖**：Codex 不内置任何在线翻译 SDK/服务，避免隐私/合规风险与依赖耦合。

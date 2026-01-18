@@ -9,6 +9,19 @@ If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="http
 
 ---
 
+## Fork: Agent Reasoning Translation Plugin (optional)
+
+This repository is a fork of `openai/codex` that adds an **external command** translation hook for `AgentReasoning` (e.g. `Thinking` / `Analyzing`) so the TUI/TUI2 can display bilingual reasoning blocks.
+
+![AgentReasoning translation preview](./.github/agent-reasoning-translation-preview.svg)
+
+- 中文说明：`README.zh-CN.md`
+- 插件设计/协议/示例：`docs/translation.md`
+
+This is not an official OpenAI repository.
+
+Note: the npm / Homebrew installation instructions below install the official OpenAI distribution. To use this fork-specific feature, build and run the `codex` binary from this repository.
+
 ## Quickstart
 
 ### Installing and running Codex CLI
@@ -55,5 +68,6 @@ You can also use Codex with an API key, but this requires [additional setup](htt
 - [**Contributing**](./docs/contributing.md)
 - [**Installing & building**](./docs/install.md)
 - [**Open source fund**](./docs/open-source-fund.md)
+- [**Agent reasoning translation (fork)**](./docs/translation.md)
 
 This repository is licensed under the [Apache-2.0 License](LICENSE).
