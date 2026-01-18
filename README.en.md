@@ -20,7 +20,7 @@ If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="http
 
 This repository is a fork of `openai/codex` that adds an **external command** translation hook for `AgentReasoning` (e.g. `Thinking` / `Analyzing`) so the TUI/TUI2 can display bilingual reasoning blocks.
 
-![AgentReasoning translation preview](./.github/agent-reasoning-translation-preview.svg)
+![AgentReasoning translation preview](./.github/agent-reasoning-translation-preview.png)
 
 - Chinese README: `README.md`
 - 插件设计/协议/示例：`docs/translation.md`
