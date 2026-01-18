@@ -4,7 +4,7 @@
 
 ## 对外说明（README 建议包含）
 
-建议在仓库首页（`README.md`/`README.zh-CN.md`）明确：
+建议在仓库首页（`README.md`/`README.en.md`）明确：
 
 - **这是上游 `openai/codex` 的 fork**，并说明 fork 的动机与目标。
 - **本 fork 新增能力**：推理输出翻译插件（外部命令钩子）
@@ -32,6 +32,45 @@
 - 构建/安装本 fork 的 `codex`
 - 配置 `translation.agent_reasoning.command`
 - 先用 `scripts/translate_agent_reasoning_dummy.py` 验证链路，再换成真正的翻译器
+
+## 上游同步策略（强烈建议）
+
+目标：让公开仓库的基线尽量贴近“官方可用版本”，减少“跟着 main 跑但遇到开发中变更”的不可控风险。
+
+建议约定两条规则：
+
+1. **日常开发可以跟随 `upstream/main`**（新特性/修复更快进入）。
+2. **对外公开/发版时优先对齐上游发布 tag**（更接近上游发布包的真实基线）。
+
+在 `openai/codex` 里，Rust CLI 的发布通常会打 tag，例如：
+
+- `rust-v0.87.0`（稳定版）
+- `rust-v0.88.0-alpha.1`（预发布）
+
+同步脚本默认会对齐“最新稳定发布 tag（rust-vX.Y.Z）”，并把本 fork 的补丁栈重新打上去，示例：
+
+```bash
+./scripts/dev-sync-upstream.sh --non-interactive --build both --link both --verify quick
+```
+
+如果你希望锁定到某个具体发布版本（例如 `rust-v0.87.0`），可显式指定：
+
+```bash
+./scripts/dev-sync-upstream.sh --non-interactive --upstream rust-v0.87.0 --build both --link both --verify quick
+```
+
+如需跟随上游开发分支（`upstream/main`）：
+
+```bash
+./scripts/dev-sync-upstream.sh --non-interactive --upstream upstream/main --build release
+```
+
+如果你想找“最新稳定版 tag”，可在 fetch tags 后用版本排序筛选（示例）：
+
+```bash
+git fetch upstream --tags --prune
+git tag --list 'rust-v*' | rg '^rust-v\\d+\\.\\d+\\.\\d+$' | sort -V | tail -n 1
+```
 
 ## 发布前检查（必须做）
 
@@ -87,4 +126,3 @@ just fix -p <crate>
 - 你是否接受 PR？（bugfix only / feature discussion first）
 - issue 的范围：只处理本 fork 相关问题，还是也协助上游问题定位？
 - 对“联网翻译”的支持边界：外部翻译器由用户自行承担 key/服务质量/合规风险
-

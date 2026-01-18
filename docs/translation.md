@@ -2,6 +2,8 @@
 
 本分支为 Codex CLI 增加了一个**可选**的翻译扩展点：通过 `config.toml` 指定一个“外部可执行命令”作为翻译器，把 TUI/TUI2 中的推理相关输出（`AgentReasoning`）从英文翻译成中文，并以“双语”形式显示。
 
+> 重要提醒：通过 `npm` / `brew` 安装的 `codex` 是上游官方发行版，**不包含**本 fork 的翻译插件。要启用翻译，请运行本仓库构建/发布的 `codex` 二进制（见 `README.md` / `README.en.md`）。
+
 ## 快速上手：写一个最小翻译器
 
 如果你只想先把链路跑通（不引入任何第三方 SDK/依赖），可以用下面这种最小实现作为起点：
@@ -126,7 +128,7 @@ Codex 会把翻译请求以 **JSON** 写入翻译器的 `stdin`，翻译器需�
 - `schema_version`: 当前协议版本（固定为 `1`）
 - `kind`: 请求类型
   - `agent_reasoning_body`：推理正文（可能包含 Markdown；**默认会包含开头的 `**标题**`**，用于一次翻译同时得到主题与正文）
-  - `agent_reasoning_title`：推理标题（通常很短，例如 `Thinking`，**预留/可选**；当前 UI 默认不再单独调用以减少一次翻译成本）
+  - `agent_reasoning_title`：推理标题（**预留字段，当前未使用**；UI 从 body 译文中提取标题以减少一次翻译成本）
 - `format`: `plain` 或 `markdown`
 - `source_language`: 当前固定为 `en`
 - `target_language`: 当前固定为 `zh-CN`
@@ -276,7 +278,7 @@ Codex 自身已经有两个与推理显示有关的配置键（见官方配置�
 
 ## 开发与升级（同步官方最新版 + 本地构建）
 
-本分支是在官方仓库 `openai/codex` 的源码上做的功能扩展。官方 `main` 更新很快，推荐把“同步上游 + 重新构建”固化为一套可重复流程，避免每次手动操作出错。
+本分支是在官方仓库 `openai/codex` 的源码上做的功能扩展。官方 `main` 更新很快；为降低“跟着开发分支跑”的不确定性，建议把“对齐上游稳定发布 tag + 重打补丁 + 重新构建”固化为一套可重复流程，避免每次手动操作出错。
 
 ### 远端约定（推荐）
 
@@ -301,13 +303,9 @@ git remote set-url --push upstream DISABLED
 
 ### 一键同步脚本（推荐）
 
-仓库提供脚本：`scripts/dev-sync-upstream.sh`，用于：
+仓库提供脚本：`scripts/dev-sync-upstream.sh`，用于把本 fork 的补丁栈重打到上游基线（等价于“自动打补丁”），并可选执行 build/link/verify/push。
 
-- `git fetch upstream --prune`
-- `git rebase upstream/main`（等价于“自动应用本分支的 patch”）
-- 可选：推送到 fork（rebase 后使用 `--force-with-lease`）
-- 可选：编译 `codex-rs` 的 `codex`（debug/release）
-- 可选：创建/更新符号链接（例如 `~/.local/bin/codex-dev`）
+默认行为会对齐“上游最新稳定发布 tag（`rust-vX.Y.Z`）”，以减少跟随 `upstream/main` 带来的不确定性；如需跟随开发分支，可显式指定 `--upstream upstream/main`。
 
 交互式（推荐给人手动用）：
 
@@ -318,7 +316,19 @@ git remote set-url --push upstream DISABLED
 非交互（推荐给自动化/AI 助手调用）：
 
 ```bash
-./scripts/dev-sync-upstream.sh --non-interactive --build release --link release
+./scripts/dev-sync-upstream.sh --non-interactive --build both --link both --verify quick
+```
+
+如果你希望锁定到某个发布版本（例如 `rust-v0.87.0`）：
+
+```bash
+./scripts/dev-sync-upstream.sh --non-interactive --upstream rust-v0.87.0 --build both --link both --verify quick
+```
+
+如需跟随上游开发分支（可能出现 `0.0.0` 这类开发版版本号属于正常现象）：
+
+```bash
+./scripts/dev-sync-upstream.sh --non-interactive --upstream upstream/main --build release
 ```
 
 如果你希望 rebase 后把分支同步推送到 fork：
