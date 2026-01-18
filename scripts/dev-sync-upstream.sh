@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # 用途：
-# - 在“官方 upstream/main”基础上，快速 rebase 你的功能分支（等价于“自动打补丁”）。
+# - 默认以“上游最新稳定发布 tag（rust-vX.Y.Z）”为基线，把本 fork 的补丁栈重新打上去（等价于“自动打补丁”）。
+# - 如需跟随上游开发分支，可显式指定：--upstream upstream/main
 # - 可选：编译 codex-rs 的 codex 二进制（debug/release）。
 # - 可选：创建/更新本地符号链接（例如 ~/.local/bin/codex-dev），方便直接运行你编译的版本。
 #
@@ -19,22 +20,29 @@ usage() {
   scripts/dev-sync-upstream.sh [选项]
 
 默认行为（交互模式）：
-  1) git fetch upstream --prune
-  2) git rebase upstream/main
+  1) git fetch upstream --prune --tags
+  2) git rebase --onto <latest stable rust tag> <patch-base>
   3) 可选：push / build / link / verify（交互询问）
 
 常用示例：
-  # 交互式：同步 upstream 并提示你选择是否编译/建链接/推送
+  # 交互式：默认对齐“最新稳定 tag”，并提示你选择是否编译/建链接/推送
   ./scripts/dev-sync-upstream.sh
 
-  # 非交互（适合自动化/AI）：同步 + 编译 release + 建 release 链接
+  # 非交互（适合自动化/AI）：对齐最新稳定 tag + 编译 release + 建 release 链接
   ./scripts/dev-sync-upstream.sh --non-interactive --build release --link release
 
-  # 非交互：同步 + 推送（rebase 后需要 force-with-lease）+ 快速验证
+  # 非交互：对齐最新稳定 tag + 推送（rebase 后需要 force-with-lease）+ 快速验证
   ./scripts/dev-sync-upstream.sh --non-interactive --push --verify quick
 
   # 只预览将要执行的命令（不做任何修改）
   ./scripts/dev-sync-upstream.sh --dry-run --build release --link both --push --verify quick
+
+  # 显式对齐到某个“发布 tag”（推荐：对外公开仓库/对齐上游 release 时使用）
+  # 说明：上游会为 Rust CLI 的发布打 tag，例如 rust-v0.87.0 / rust-v0.88.0-alpha.1（预发布）
+  ./scripts/dev-sync-upstream.sh --non-interactive --upstream rust-v0.87.0 --build both --link both --verify quick
+
+  # 跟随上游开发分支（会得到 0.0.0 这类开发版本号属正常现象）
+  ./scripts/dev-sync-upstream.sh --non-interactive --upstream upstream/main --build release
 
 选项：
   -n, --non-interactive        非交互运行（不提示；未指定的可选步骤默认跳过）
@@ -43,7 +51,8 @@ usage() {
       --no-fetch               跳过 fetch upstream（默认会 fetch）
       --no-rebase              跳过 rebase（默认会 rebase）
       --branch <name>          切换到指定分支后再执行（默认当前分支）
-      --upstream <ref>         上游基准 ref（默认 upstream/main）
+      --upstream <ref>         上游基准 ref（默认 latest-stable，即最新 rust 稳定 tag）
+      --patch-base <ref>       补丁基线 ref（默认通过 marker 文件自动检测；若历史变更/文件迁移请手动指定）
       --push                   rebase 成功后推送到 origin（使用 --force-with-lease）
       --build <mode>           编译模式：none|debug|release|both
       --link <mode>            建立符号链接：none|debug|release|both
@@ -102,6 +111,43 @@ require_enum() {
   local value="$2"
   shift 2
   is_enum "$value" "$@" || die "参数 ${flag} 的值无效：${value}（允许值：$*）"
+}
+
+latest_stable_rust_tag() {
+  # 选择最新“稳定发布”tag：
+  # - 稳定 tag 定义为：严格匹配 `rust-vX.Y.Z`（末尾不带任何后缀）
+  # - 预发布通常形如：rust-v0.88.0-alpha.1 / rust-v0.11.0-beta.1 / rust-v0.12.0-rc.1
+  #
+  # 这样做的目的：避免仅靠排除某些后缀（alpha/beta/rc）导致未来出现新命名（preview/dev 等）时误判“稳定”。
+  local tag
+  tag="$(
+    git -C "$REPO_ROOT" tag --list 'rust-v*' --sort=-v:refname \
+      | while read -r candidate; do
+          if [[ "$candidate" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$candidate"
+            break
+          fi
+        done
+  )"
+  [[ -n "$tag" ]] || die "未找到可用的上游稳定 tag（期望形如 rust-v0.87.0）。请先执行 git fetch upstream --tags --prune。"
+  echo "$tag"
+}
+
+auto_patch_base() {
+  # 自动推断“补丁基线”（即：本 fork 的自定义提交栈从哪里开始）。
+  #
+  # 约定：
+  # - 本 fork 的核心扩展（推理译文插件）会引入 `codex-rs/core/src/translation/external_command.rs`
+  # - 我们把“首次引入该文件的提交”的父提交作为补丁基线
+  #
+  # 这样做的目的：
+  # - 避免仅凭 upstream/main 的 hash 做范围计算（本仓库历史中存在同一上游变更但 hash 不同的情况）
+  # - 确保“重新打补丁”只搬运本 fork 自己的改动，而不是把上游的开发提交一并重放到发布 tag 上
+  local marker_file="codex-rs/core/src/translation/external_command.rs"
+  local first_commit
+  first_commit="$(git -C "$REPO_ROOT" log --reverse --format=%H -- "$marker_file" | head -n 1 || true)"
+  [[ -n "$first_commit" ]] || die "无法自动推断补丁基线：在历史中找不到 ${marker_file}。请用 --patch-base 显式指定。"
+  git -C "$REPO_ROOT" rev-parse "${first_commit}^"
 }
 
 run_cmd() {
@@ -199,7 +245,8 @@ DO_PUSH=0
 PUSH_EXPLICIT=0
 
 TARGET_BRANCH=""
-UPSTREAM_REF="upstream/main"
+UPSTREAM_REF="latest-stable"
+PATCH_BASE_REF=""
 BUILD_MODE=""
 LINK_MODE=""
 VERIFY_MODE=""
@@ -249,6 +296,11 @@ while [[ $# -gt 0 ]]; do
     --upstream)
       require_arg "--upstream" "${2:-}"
       UPSTREAM_REF="$2"
+      shift 2
+      ;;
+    --patch-base)
+      require_arg "--patch-base" "${2:-}"
+      PATCH_BASE_REF="$2"
       shift 2
       ;;
     --build)
@@ -319,7 +371,7 @@ if [[ "${ALLOW_DIRTY}" -ne 1 ]]; then
     die "工作区不干净（存在未提交改动/未跟踪文件）。请先提交或 stash，或显式传 --allow-dirty（不推荐）。"
   fi
 else
-  warn "已启用 --allow-dirty：rebase/切换分支可能失败，且可能导致你更难回滚；请确认你了解风险。"
+  warn "已启用 --allow-dirty：rebase 将使用 --autostash 临时收起本地改动；若存在冲突，仍需手工处理。"
 fi
 
 # ===== 交互补齐参数 =====
@@ -373,23 +425,59 @@ if [[ ! -d "$CODEX_RS_DIR" ]]; then
   die "未找到 codex-rs 目录：${CODEX_RS_DIR}"
 fi
 
-info "仓库：${REPO_ROOT}"
-info "分支：${CURRENT_BRANCH}"
-info "上游：${UPSTREAM_REF}"
-info "模式：fetch=${DO_FETCH} rebase=${DO_REBASE} push=${DO_PUSH} build=${BUILD_MODE} link=${LINK_MODE} verify=${VERIFY_MODE} dry-run=${DRY_RUN}"
+PATCH_BASE=""
 
 # ===== 执行：fetch / rebase / push =====
 
 if [[ "$DO_FETCH" -eq 1 ]]; then
   info "同步 upstream..."
-  run_git fetch upstream --prune
+  run_git fetch upstream --prune --tags
 else
   info "跳过 fetch upstream（--no-fetch）"
 fi
 
+if [[ "$UPSTREAM_REF" == "latest-stable" ]]; then
+  UPSTREAM_REF="$(latest_stable_rust_tag)"
+fi
+
+if [[ -n "$PATCH_BASE_REF" ]]; then
+  PATCH_BASE="$PATCH_BASE_REF"
+else
+  PATCH_BASE="$(auto_patch_base)"
+fi
+
+UPSTREAM_VERSION=""
+if [[ "$UPSTREAM_REF" == rust-v* ]]; then
+  UPSTREAM_VERSION="${UPSTREAM_REF#rust-v}"
+fi
+
+PATCH_BASE_SHORT="$(git -C "$REPO_ROOT" rev-parse --short "$PATCH_BASE")"
+
+info "仓库：${REPO_ROOT}"
+info "分支：${CURRENT_BRANCH}"
+info "补丁基线：${PATCH_BASE_SHORT}"
+if [[ -n "$UPSTREAM_VERSION" ]]; then
+  info "目标基线：${UPSTREAM_REF}（version=${UPSTREAM_VERSION}）"
+else
+  info "目标基线：${UPSTREAM_REF}"
+fi
+info "模式：fetch=${DO_FETCH} rebase=${DO_REBASE} push=${DO_PUSH} build=${BUILD_MODE} link=${LINK_MODE} verify=${VERIFY_MODE} dry-run=${DRY_RUN}"
+
 if [[ "$DO_REBASE" -eq 1 ]]; then
-  info "rebase 到 ${UPSTREAM_REF}..."
-  if ! run_git rebase "$UPSTREAM_REF"; then
+  info "重新打补丁：把 ${PATCH_BASE_SHORT} 之后的本地提交栈应用到 ${UPSTREAM_REF}..."
+  if [[ "${DRY_RUN}" -ne 1 ]]; then
+    if ! run_git rev-parse --verify "${PATCH_BASE}^{commit}" >/dev/null 2>&1; then
+      die "补丁基线 ref 不存在或不可解析：${PATCH_BASE}（请确认 remote upstream 存在且已 fetch）"
+    fi
+    if ! run_git rev-parse --verify "${UPSTREAM_REF}^{commit}" >/dev/null 2>&1; then
+      die "上游 ref 不存在或不可解析：${UPSTREAM_REF}（如果是 tag，请确保已 fetch tags；脚本默认会 fetch --tags）"
+    fi
+  fi
+  if [[ "$ALLOW_DIRTY" -eq 1 ]]; then
+    if ! run_git rebase --autostash --onto "$UPSTREAM_REF" "$PATCH_BASE"; then
+      die "rebase 失败（已启用 --autostash）。请根据 git 输出解决冲突后执行 git rebase --continue，或执行 git rebase --abort 放弃本次 rebase。"
+    fi
+  elif ! run_git rebase --onto "$UPSTREAM_REF" "$PATCH_BASE"; then
     cat >&2 <<EOF
 
 rebase 失败（通常是冲突）。
@@ -517,8 +605,27 @@ verify_quick() {
   (cd "$REPO_ROOT" && run_cmd just fmt)
   (cd "$CODEX_RS_DIR" && run_cmd cargo test -p codex-core translation)
   (cd "$CODEX_RS_DIR" && run_cmd cargo test -p codex-exec)
+  # codex-tui / codex-tui2 的集成测试会 spawn `codex` 二进制。
+  # 但该二进制不一定会被 `cargo test -p codex-tui` 自动重新构建（容易误用旧产物）。
+  # 因此这里显式 build 一次，保证测试用到的是“当前 HEAD”对应的 `codex`。
+  (cd "$CODEX_RS_DIR" && run_cmd cargo build -p codex-cli)
   (cd "$CODEX_RS_DIR" && run_cmd cargo test -p codex-tui)
   (cd "$CODEX_RS_DIR" && run_cmd cargo test -p codex-tui2)
+
+  if [[ "$LINK_MODE" != "none" ]]; then
+    info "验证软链接可用性：运行 codex-dev* --version"
+    local dev="${LINK_DIR}/codex-dev"
+    if [[ "${DRY_RUN}" -ne 1 ]]; then
+      [[ -x "$dev" ]] || die "找不到可执行链接：${dev}（请先 --link ...）"
+    fi
+    run_cmd "$dev" --version
+    if [[ "$LINK_MODE" == "debug" || "$LINK_MODE" == "both" ]]; then
+      run_cmd "${LINK_DIR}/codex-dev-debug" --version
+    fi
+    if [[ "$LINK_MODE" == "release" || "$LINK_MODE" == "both" ]]; then
+      run_cmd "${LINK_DIR}/codex-dev-release" --version
+    fi
+  fi
 }
 
 case "$VERIFY_MODE" in
