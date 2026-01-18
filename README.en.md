@@ -26,6 +26,7 @@ This repository is a fork of `openai/codex` that adds an **external command** tr
 - 插件设计/协议/示例：`docs/translation.md`
 - Troubleshooting (WSL / terminal CPR issues): `docs/troubleshooting.md`
 - Tested primarily on **Windows 11 via WSL2**; other environments have not been systematically verified yet.
+- Issues: please file issues in this fork first; if it looks like an upstream issue (`openai/codex`), include a link to the upstream issue (or the search keywords + repro steps) so we can track and sync the fix.
 
 This is not an official OpenAI repository.
 
