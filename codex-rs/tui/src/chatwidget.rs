@@ -2362,6 +2362,7 @@ impl ChatWidget {
             widget.config.features.enabled(Feature::CollaborationModes),
         );
         widget.sync_personality_command_enabled();
+        widget.update_collaboration_mode_indicator();
 
         widget
     }
