@@ -605,12 +605,17 @@ verify_quick() {
   (cd "$REPO_ROOT" && run_cmd just fmt)
   (cd "$CODEX_RS_DIR" && run_cmd cargo test -p codex-core translation)
   (cd "$CODEX_RS_DIR" && run_cmd cargo test -p codex-exec)
-  # codex-tui / codex-tui2 的集成测试会 spawn `codex` 二进制。
+  # codex-tui（以及旧版本的 codex-tui2）集成测试会 spawn `codex` 二进制。
   # 但该二进制不一定会被 `cargo test -p codex-tui` 自动重新构建（容易误用旧产物）。
   # 因此这里显式 build 一次，保证测试用到的是“当前 HEAD”对应的 `codex`。
   (cd "$CODEX_RS_DIR" && run_cmd cargo build -p codex-cli)
   (cd "$CODEX_RS_DIR" && run_cmd cargo test -p codex-tui)
-  (cd "$CODEX_RS_DIR" && run_cmd cargo test -p codex-tui2)
+  # 上游 rust-v0.92.0 起已移除 codex-tui2；若你的基线仍包含该 crate，则继续跑。
+  if [[ -f "${CODEX_RS_DIR}/tui2/Cargo.toml" ]]; then
+    (cd "$CODEX_RS_DIR" && run_cmd cargo test -p codex-tui2)
+  else
+    info "跳过 codex-tui2：未发现 ${CODEX_RS_DIR}/tui2/Cargo.toml（该 crate 可能已被上游移除）"
+  fi
 
   if [[ "$LINK_MODE" != "none" ]]; then
     info "验证软链接可用性：运行 codex-dev* --version"

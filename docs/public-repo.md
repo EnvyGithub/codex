@@ -117,7 +117,7 @@ just fmt
 just fix -p <crate>
 ```
 
-（注意：本 fork 的翻译功能主要影响 `codex-core` / `codex-exec` / `codex-tui` / `codex-tui2`。）
+（注意：本 fork 的翻译功能主要影响 `codex-core` / `codex-exec` / `codex-tui`；上游 `rust-v0.92.0` 起已移除 `codex-tui2`。）
 
 ## 对外支持策略（可选，但建议写清）
 
