@@ -2,7 +2,7 @@ name: sdk
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/agent-reasoning-translation-plugin]
   pull_request: {}
 
 jobs:
