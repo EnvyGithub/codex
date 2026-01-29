@@ -98,3 +98,44 @@ RUST_BACKTRACE=1 codex
 - 确保翻译器 **stdout 只输出 JSON**；日志写 stderr。
 - 出网翻译建议把 `timeout_ms` 设大一些（例如 8000ms 或 15000ms），并根据需要调大 `ui_max_wait_ms`（见 `docs/translation.md`）。
 
+## 3) 本地跑全量测试失败：`Unable to find libclang`（bindgen/clang-sys）
+
+现象：
+
+- 运行 `cargo test --all-features`（或某些启用 bindgen 的 crate）时报错：
+  - `Unable to find libclang: ... set the LIBCLANG_PATH environment variable ...`
+
+结论（通常）：
+
+- 这是 **系统缺少 clang/libclang**（或没被动态链接器找到）导致的环境问题，不是本 fork 的“推理翻译插件”逻辑本身。
+- `--all-features` 会把一些平时不会编译到的依赖也拉进来，其中可能包含需要 bindgen 的 crate，因此更容易触发。
+
+### 解决方案（WSL2 / Ubuntu）
+
+1) 安装 clang + libclang（需要 sudo 权限）：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y clang libclang-dev
+```
+
+2) 验证 clang 可用：
+
+```bash
+clang --version
+```
+
+3) 若仍提示找不到 `libclang.so`，可以定位并显式设置 `LIBCLANG_PATH`（示例）：
+
+```bash
+sudo find /usr -name 'libclang.so*' -print
+# 例如你找到的是 /usr/lib/llvm-17/lib/libclang.so.1，则：
+export LIBCLANG_PATH=/usr/lib/llvm-17/lib
+```
+
+然后重试：
+
+```bash
+cd codex-rs
+cargo test --all-features
+```
