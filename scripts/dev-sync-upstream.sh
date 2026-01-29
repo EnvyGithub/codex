@@ -611,10 +611,22 @@ verify_quick() {
   (cd "$CODEX_RS_DIR" && run_cmd cargo build -p codex-cli)
   (cd "$CODEX_RS_DIR" && run_cmd cargo test -p codex-tui)
   # 上游 rust-v0.92.0 起已移除 codex-tui2；若你的基线仍包含该 crate，则继续跑。
-  if [[ -f "${CODEX_RS_DIR}/tui2/Cargo.toml" ]]; then
-    (cd "$CODEX_RS_DIR" && run_cmd cargo test -p codex-tui2)
+  #
+  # 这里不做“多路径回退默认值”，而是做一个可观测的一致性判断：
+  # - manifest 存在 && workspace 也包含该包：跑测试
+  # - manifest 存在但 workspace 不包含：告警并跳过（通常是遗留目录，跑会失败）
+  # - manifest 不存在：跳过（上游已移除）
+  local tui2_manifest="${CODEX_RS_DIR}/tui2/Cargo.toml"
+  if [[ -f "$tui2_manifest" ]]; then
+    local metadata_json
+    metadata_json="$(cd "$CODEX_RS_DIR" && cargo metadata --format-version 1 --no-deps)"
+    if python3 -c 'import json,sys; data=json.load(sys.stdin); sys.exit(0 if any(p.get("name")=="codex-tui2" for p in data.get("packages", [])) else 1)' <<<"$metadata_json"; then
+      (cd "$CODEX_RS_DIR" && run_cmd cargo test -p codex-tui2)
+    else
+      warn "发现 ${tui2_manifest}，但 workspace 未包含 codex-tui2；跳过对应测试（可能是遗留目录）"
+    fi
   else
-    info "跳过 codex-tui2：未发现 ${CODEX_RS_DIR}/tui2/Cargo.toml（该 crate 可能已被上游移除）"
+    info "跳过 codex-tui2：未发现 ${tui2_manifest}（该 crate 可能已被上游移除）"
   fi
 
   if [[ "$LINK_MODE" != "none" ]]; then
