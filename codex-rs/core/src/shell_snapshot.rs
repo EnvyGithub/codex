@@ -459,15 +459,15 @@ async fn remove_snapshot_file(path: &Path) {
 }
 
 #[cfg(test)]
-    mod tests {
-        use super::*;
-        use pretty_assertions::assert_eq;
-        #[cfg(unix)]
-        use std::os::unix::ffi::OsStrExt;
-        #[cfg(unix)]
-        use std::process::Command;
-        #[cfg(target_os = "linux")]
-        use std::process::Command as StdCommand;
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
+    #[cfg(unix)]
+    use std::process::Command;
+    #[cfg(target_os = "linux")]
+    use std::process::Command as StdCommand;
 
     use tempfile::tempdir;
 
