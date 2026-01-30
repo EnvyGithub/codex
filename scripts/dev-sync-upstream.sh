@@ -24,6 +24,12 @@ usage() {
   2) git rebase --onto <latest stable rust tag> <patch-base>
   3) 可选：push / build / link / verify（交互询问）
 
+  说明（版本对齐）：
+  - 当 upstream 选择的是 rust-v* tag 且启用了 build/verify 时，
+    脚本会临时把 codex-rs/Cargo.toml 的 workspace.package.version 写成该 tag 的版本号，
+    并备份/恢复 codex-rs/Cargo.lock，确保 `codex --version` 对应该 tag。
+  - 脚本退出会自动恢复上述文件，不把 version 变化带进补丁栈（保持 git 干净）。
+
 常用示例：
   # 交互式：默认对齐“最新稳定 tag”，并提示你选择是否编译/建链接/推送
   ./scripts/dev-sync-upstream.sh
@@ -168,6 +174,115 @@ run_cmd() {
 
 run_git() {
   run_cmd git -C "$REPO_ROOT" "$@"
+}
+
+VERSION_OVERRIDE_DIR=""
+VERSION_OVERRIDE_APPLIED=0
+
+restore_workspace_version_override() {
+  if [[ "${VERSION_OVERRIDE_APPLIED}" -ne 1 ]]; then
+    return 0
+  fi
+
+  if [[ -z "${VERSION_OVERRIDE_DIR}" || ! -d "${VERSION_OVERRIDE_DIR}" ]]; then
+    warn "未找到版本备份目录（VERSION_OVERRIDE_DIR=${VERSION_OVERRIDE_DIR}），跳过恢复。"
+    return 0
+  fi
+
+  local cargo_toml="${CODEX_RS_DIR}/Cargo.toml"
+  local cargo_lock="${CODEX_RS_DIR}/Cargo.lock"
+
+  info "恢复 workspace 版本文件（Cargo.toml/Cargo.lock）..."
+  if [[ -f "${VERSION_OVERRIDE_DIR}/Cargo.toml" ]]; then
+    run_cmd cp "${VERSION_OVERRIDE_DIR}/Cargo.toml" "$cargo_toml"
+  fi
+  if [[ -f "${VERSION_OVERRIDE_DIR}/Cargo.lock" ]]; then
+    run_cmd cp "${VERSION_OVERRIDE_DIR}/Cargo.lock" "$cargo_lock"
+  fi
+
+  if [[ "${DRY_RUN}" -ne 1 ]]; then
+    run_cmd rm -rf "${VERSION_OVERRIDE_DIR}"
+  fi
+
+  VERSION_OVERRIDE_DIR=""
+  VERSION_OVERRIDE_APPLIED=0
+}
+
+should_override_workspace_version() {
+  # 仅当：
+  # - 上游 ref 是 rust-v* tag（因此 UPSTREAM_VERSION 非空）
+  # - 且本次确实会 build/verify（否则没必要改写）
+  if [[ -z "${UPSTREAM_VERSION}" ]]; then
+    return 1
+  fi
+  if [[ "${BUILD_MODE}" == "none" && "${VERIFY_MODE}" == "none" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+apply_workspace_version_override() {
+  if ! should_override_workspace_version; then
+    return 0
+  fi
+
+  # 交互/非交互都一致：仅影响本次 build/verify 的产物版本号；
+  # 脚本退出时自动恢复，避免把 “version 变化” 带进补丁栈。
+  local cargo_toml="${CODEX_RS_DIR}/Cargo.toml"
+  local cargo_lock="${CODEX_RS_DIR}/Cargo.lock"
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    info "dry-run：将临时写入 workspace version=${UPSTREAM_VERSION} 到 ${cargo_toml}（并在脚本退出时恢复）"
+    return 0
+  fi
+
+  VERSION_OVERRIDE_DIR="$(mktemp -d)"
+  VERSION_OVERRIDE_APPLIED=1
+  trap restore_workspace_version_override EXIT
+
+  run_cmd cp "$cargo_toml" "${VERSION_OVERRIDE_DIR}/Cargo.toml"
+  if [[ -f "$cargo_lock" ]]; then
+    run_cmd cp "$cargo_lock" "${VERSION_OVERRIDE_DIR}/Cargo.lock"
+  fi
+
+  info "临时写入 workspace version=${UPSTREAM_VERSION}（仅用于本次 build/verify；脚本退出自动恢复）"
+  run_cmd python3 - "$cargo_toml" "$UPSTREAM_VERSION" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+cargo_toml_path = Path(sys.argv[1])
+new_version = sys.argv[2]
+
+raw = cargo_toml_path.read_text(encoding="utf-8")
+lines = raw.splitlines(keepends=True)
+
+in_workspace_package = False
+replaced = False
+out = []
+
+for line in lines:
+    if re.match(r"^\[.*\]\s*$", line):
+        in_workspace_package = line.strip() == "[workspace.package]"
+        out.append(line)
+        continue
+
+    if in_workspace_package and not replaced:
+        match = re.match(r'^version\s*=\s*"[^"]*"\s*(#.*)?\n?$', line)
+        if match:
+            suffix = match.group(1) or ""
+            newline = "\n" if line.endswith("\n") else ""
+            out.append(f'version = "{new_version}"{suffix}{newline}')
+            replaced = True
+            continue
+
+    out.append(line)
+
+if not replaced:
+    raise SystemExit("failed to update [workspace.package] version in Cargo.toml")
+
+cargo_toml_path.write_text("".join(out), encoding="utf-8")
+PY
 }
 
 prompt_yes_no() {
@@ -503,6 +618,12 @@ if [[ "$DO_PUSH" -eq 1 ]]; then
   info "推送到 origin（rebase 后使用 --force-with-lease）..."
   run_git push --force-with-lease origin "$CURRENT_BRANCH"
 fi
+
+# ===== 执行：临时版本对齐（仅影响 build/verify 产物）=====
+#
+# 目标：让编译出的二进制（`codex --version`）与上游 rust-v* tag 一致，
+# 但不把 version 变化带进补丁栈（脚本退出自动恢复）。
+apply_workspace_version_override
 
 # ===== 执行：build =====
 
