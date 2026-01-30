@@ -280,6 +280,12 @@
         "personality": {
           "$ref": "#/definitions/Personality"
         },
+        "plugins": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "插件配置（通用命名空间）。",
+          "type": "object"
+        },
         "sandbox_mode": {
           "$ref": "#/definitions/SandboxMode"
         },
@@ -1431,6 +1437,12 @@
         }
       ],
       "description": "Optionally specify a personality for the model"
+    },
+    "plugins": {
+      "additionalProperties": true,
+      "default": {},
+      "description": "插件配置（通用命名空间）。",
+      "type": "object"
     },
     "profile": {
       "description": "Profile to use from the `profiles` map.",

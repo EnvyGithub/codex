@@ -2,8 +2,6 @@ use crate::auth::AuthCredentialsStoreMode;
 use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
 use crate::config::types::AgentReasoningTranslationConfig;
-use crate::config::types::DEFAULT_AGENT_REASONING_TRANSLATION_TIMEOUT_MS;
-use crate::config::types::DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS;
 use crate::config::types::DEFAULT_OTEL_ENVIRONMENT;
 use crate::config::types::History;
 use crate::config::types::McpServerConfig;
@@ -101,6 +99,25 @@ pub(crate) const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024; // 32 KiB
 pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(6);
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
+
+const ALLOWED_PLUGIN_NAMES: [&str; 1] = ["translation"];
+
+fn validate_plugins_in_scope(
+    scope: &str,
+    plugins: &HashMap<String, TomlValue>,
+) -> std::io::Result<()> {
+    for plugin_name in plugins.keys() {
+        if !ALLOWED_PLUGIN_NAMES.contains(&plugin_name.as_str()) {
+            let allowed = ALLOWED_PLUGIN_NAMES.join(", ");
+            let path = format!("[{scope}.{plugin_name}]");
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("未知插件名 `{plugin_name}` 出现在 `{path}`。允许的插件名：{allowed}。"),
+            ));
+        }
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 pub(crate) fn test_config() -> Config {
@@ -920,7 +937,16 @@ pub struct ConfigToml {
     /// Defaults to `false`.
     pub show_raw_agent_reasoning: Option<bool>,
 
+    /// 插件配置（通用命名空间）。
+    #[serde(default)]
+    #[schemars(schema_with = "crate::config::schema::plugins_schema")]
+    pub plugins: HashMap<String, TomlValue>,
+
     /// 翻译相关配置（外部命令插件）。
+    ///
+    /// 说明：翻译配置已迁移到 `[plugins.translation]` 命名空间；旧路径仅用于兼容与迁移。
+    /// 为降低主 schema 的 churn，这里不写入 `config.schema.json`。
+    #[schemars(skip)]
     pub translation: Option<TranslationToml>,
 
     pub model_reasoning_effort: Option<ReasoningEffort>,
@@ -1175,6 +1201,17 @@ impl ConfigToml {
         }
     }
 
+    fn validate_plugins(&self) -> std::io::Result<()> {
+        validate_plugins_in_scope("plugins", &self.plugins)?;
+        for (profile_name, profile) in &self.profiles {
+            validate_plugins_in_scope(
+                &format!("profiles.{profile_name}.plugins"),
+                &profile.plugins,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Resolves the cwd to an existing project, or returns None if ConfigToml
     /// does not contain a project corresponding to cwd or a git repo for cwd
     pub fn get_active_project(&self, resolved_cwd: &Path) -> Option<ProjectConfig> {
@@ -1347,6 +1384,8 @@ impl Config {
             ephemeral,
             additional_writable_roots,
         } = overrides;
+
+        cfg.validate_plugins()?;
 
         let active_profile_name = config_profile_key
             .as_ref()
@@ -1529,39 +1568,16 @@ impl Config {
 
         let model = model.or(config_profile.model).or(cfg.model);
 
-        let agent_reasoning_translation = {
-            let global = cfg
-                .translation
-                .as_ref()
-                .and_then(|translation| translation.agent_reasoning.as_ref());
-            let profile = config_profile
-                .translation
-                .as_ref()
-                .and_then(|translation| translation.agent_reasoning.as_ref());
-
-            let command = profile
-                .and_then(|settings| settings.command.clone())
-                .or_else(|| global.and_then(|settings| settings.command.clone()));
-
-            let timeout_ms = profile
-                .and_then(|settings| settings.timeout_ms)
-                .or_else(|| global.and_then(|settings| settings.timeout_ms))
-                .unwrap_or(DEFAULT_AGENT_REASONING_TRANSLATION_TIMEOUT_MS);
-
-            let ui_max_wait_ms = profile
-                .and_then(|settings| settings.ui_max_wait_ms)
-                .or_else(|| global.and_then(|settings| settings.ui_max_wait_ms))
-                .unwrap_or(DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS);
-
-            match command {
-                Some(command) if !command.is_empty() => Some(AgentReasoningTranslationConfig {
-                    command,
-                    timeout: std::time::Duration::from_millis(timeout_ms),
-                    ui_max_wait: std::time::Duration::from_millis(ui_max_wait_ms),
-                }),
-                _ => None,
-            }
-        };
+        let agent_reasoning_translation =
+            crate::translation::resolve_agent_reasoning_translation_config(
+                crate::translation::AgentReasoningTranslationConfigSources {
+                    active_profile_name: active_profile_name.as_deref(),
+                    global_plugins_translation: cfg.plugins.get("translation"),
+                    global_legacy_translation: cfg.translation.as_ref(),
+                    profile_plugins_translation: config_profile.plugins.get("translation"),
+                    profile_legacy_translation: config_profile.translation.as_ref(),
+                },
+            )?;
 
         let compact_prompt = compact_prompt.or(cfg.compact_prompt).and_then(|value| {
             let trimmed = value.trim();
@@ -1960,6 +1976,93 @@ persistence = "none"
     }
 
     #[test]
+    fn plugins_rejects_unknown_plugin_name_in_global_scope() -> std::io::Result<()> {
+        let toml = r#"
+[plugins.unknown_plugin]
+enabled = true
+"#;
+        let cfg: ConfigToml = toml::from_str(toml).expect("TOML deserialization should succeed");
+
+        let cwd_temp_dir = TempDir::new()?;
+        let cwd = cwd_temp_dir.path().to_path_buf();
+        // 测试中避免向上扫描 AGENTS.md（以及其它项目文档）。
+        std::fs::write(cwd.join(".git"), "gitdir: fake\n")?;
+
+        let codex_home = TempDir::new()?;
+        let err = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                cwd: Some(cwd),
+                ..Default::default()
+            },
+            codex_home.path().to_path_buf(),
+        )
+        .expect_err("unknown plugin should be rejected");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("unknown_plugin"));
+        assert!(err.to_string().contains("translation"));
+        Ok(())
+    }
+
+    #[test]
+    fn plugins_rejects_unknown_plugin_name_in_profile_scope() -> std::io::Result<()> {
+        let toml = r#"
+[profiles.dev.plugins.unknown_plugin]
+enabled = true
+"#;
+        let cfg: ConfigToml = toml::from_str(toml).expect("TOML deserialization should succeed");
+
+        let cwd_temp_dir = TempDir::new()?;
+        let cwd = cwd_temp_dir.path().to_path_buf();
+        // 测试中避免向上扫描 AGENTS.md（以及其它项目文档）。
+        std::fs::write(cwd.join(".git"), "gitdir: fake\n")?;
+
+        let codex_home = TempDir::new()?;
+        let err = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                cwd: Some(cwd),
+                ..Default::default()
+            },
+            codex_home.path().to_path_buf(),
+        )
+        .expect_err("unknown plugin should be rejected");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("profiles.dev"));
+        assert!(err.to_string().contains("unknown_plugin"));
+        assert!(err.to_string().contains("translation"));
+        Ok(())
+    }
+
+    #[test]
+    fn plugins_allows_translation_plugin_name() -> std::io::Result<()> {
+        let toml = r#"
+[plugins.translation]
+enabled = true
+"#;
+        let cfg: ConfigToml = toml::from_str(toml).expect("TOML deserialization should succeed");
+
+        let cwd_temp_dir = TempDir::new()?;
+        let cwd = cwd_temp_dir.path().to_path_buf();
+        // 测试中避免向上扫描 AGENTS.md（以及其它项目文档）。
+        std::fs::write(cwd.join(".git"), "gitdir: fake\n")?;
+
+        let codex_home = TempDir::new()?;
+        let _config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                cwd: Some(cwd),
+                ..Default::default()
+            },
+            codex_home.path().to_path_buf(),
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
     fn agent_reasoning_translation_disabled_by_default() -> std::io::Result<()> {
         let cfg = ConfigToml::default();
         let cwd_temp_dir = TempDir::new()?;
@@ -2018,6 +2121,152 @@ ui_max_wait_ms = 5678
     }
 
     #[test]
+    fn agent_reasoning_translation_loads_from_plugins_toml() -> std::io::Result<()> {
+        let toml = r#"
+[plugins.translation.agent_reasoning]
+command = ["python3", "/tmp/translate.py"]
+timeout_ms = 1234
+ui_max_wait_ms = 5678
+"#;
+        let cfg: ConfigToml = toml::from_str(toml).expect("TOML deserialization should succeed");
+
+        let cwd_temp_dir = TempDir::new()?;
+        let cwd = cwd_temp_dir.path().to_path_buf();
+        // 测试中避免向上扫描 AGENTS.md（以及其它项目文档）。
+        std::fs::write(cwd.join(".git"), "gitdir: fake\n")?;
+
+        let codex_home = TempDir::new()?;
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                cwd: Some(cwd),
+                ..Default::default()
+            },
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(
+            config.agent_reasoning_translation,
+            Some(AgentReasoningTranslationConfig {
+                command: vec!["python3".to_string(), "/tmp/translate.py".to_string()],
+                timeout: Duration::from_millis(1234),
+                ui_max_wait: Duration::from_millis(5678),
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn agent_reasoning_translation_rejects_new_and_old_in_global_scope() -> std::io::Result<()> {
+        let toml = r#"
+[plugins.translation.agent_reasoning]
+command = ["python3", "/tmp/translate.py"]
+
+[translation.agent_reasoning]
+command = ["python3", "/tmp/translate.py"]
+"#;
+        let cfg: ConfigToml = toml::from_str(toml).expect("TOML deserialization should succeed");
+
+        let cwd_temp_dir = TempDir::new()?;
+        let cwd = cwd_temp_dir.path().to_path_buf();
+        // 测试中避免向上扫描 AGENTS.md（以及其它项目文档）。
+        std::fs::write(cwd.join(".git"), "gitdir: fake\n")?;
+
+        let codex_home = TempDir::new()?;
+        let err = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                cwd: Some(cwd),
+                ..Default::default()
+            },
+            codex_home.path().to_path_buf(),
+        )
+        .expect_err("new + old in same scope should be rejected");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string()
+                .contains("[plugins.translation.agent_reasoning]")
+        );
+        assert!(err.to_string().contains("[translation.agent_reasoning]"));
+        Ok(())
+    }
+
+    #[test]
+    fn agent_reasoning_translation_rejects_new_and_old_in_profile_scope() -> std::io::Result<()> {
+        let toml = r#"
+[profiles.dev.plugins.translation.agent_reasoning]
+command = ["python3", "/tmp/translate.py"]
+
+[profiles.dev.translation.agent_reasoning]
+command = ["python3", "/tmp/translate.py"]
+"#;
+        let cfg: ConfigToml = toml::from_str(toml).expect("TOML deserialization should succeed");
+
+        let cwd_temp_dir = TempDir::new()?;
+        let cwd = cwd_temp_dir.path().to_path_buf();
+        // 测试中避免向上扫描 AGENTS.md（以及其它项目文档）。
+        std::fs::write(cwd.join(".git"), "gitdir: fake\n")?;
+
+        let codex_home = TempDir::new()?;
+        let err = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                cwd: Some(cwd),
+                config_profile: Some("dev".to_string()),
+                ..Default::default()
+            },
+            codex_home.path().to_path_buf(),
+        )
+        .expect_err("new + old in same scope should be rejected");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string()
+                .contains("[profiles.dev.plugins.translation.agent_reasoning]")
+        );
+        assert!(
+            err.to_string()
+                .contains("[profiles.dev.translation.agent_reasoning]")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn agent_reasoning_translation_rejects_unknown_fields_in_new_path() -> std::io::Result<()> {
+        let toml = r#"
+[plugins.translation.agent_reasoning]
+command = ["python3", "/tmp/translate.py"]
+unknown_field = 1
+"#;
+        let cfg: ConfigToml = toml::from_str(toml).expect("TOML deserialization should succeed");
+
+        let cwd_temp_dir = TempDir::new()?;
+        let cwd = cwd_temp_dir.path().to_path_buf();
+        // 测试中避免向上扫描 AGENTS.md（以及其它项目文档）。
+        std::fs::write(cwd.join(".git"), "gitdir: fake\n")?;
+
+        let codex_home = TempDir::new()?;
+        let err = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                cwd: Some(cwd),
+                ..Default::default()
+            },
+            codex_home.path().to_path_buf(),
+        )
+        .expect_err("unknown fields should be rejected");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string()
+                .contains("[plugins.translation.agent_reasoning]")
+        );
+        assert!(err.to_string().contains("unknown_field"));
+        Ok(())
+    }
+
+    #[test]
     fn agent_reasoning_translation_profile_overrides_global() -> std::io::Result<()> {
         let toml = r#"
 [translation.agent_reasoning]
@@ -2025,6 +2274,39 @@ command = ["python3", "/tmp/translate.py"]
 timeout_ms = 1234
 
 [profiles.no_translate.translation.agent_reasoning]
+command = []
+"#;
+        let cfg: ConfigToml = toml::from_str(toml).expect("TOML deserialization should succeed");
+
+        let cwd_temp_dir = TempDir::new()?;
+        let cwd = cwd_temp_dir.path().to_path_buf();
+        // 测试中避免向上扫描 AGENTS.md（以及其它项目文档）。
+        std::fs::write(cwd.join(".git"), "gitdir: fake\n")?;
+
+        let codex_home = TempDir::new()?;
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                cwd: Some(cwd),
+                config_profile: Some("no_translate".to_string()),
+                ..Default::default()
+            },
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(config.agent_reasoning_translation, None);
+        Ok(())
+    }
+
+    #[test]
+    fn agent_reasoning_translation_profile_overrides_global_in_plugins_toml() -> std::io::Result<()>
+    {
+        let toml = r#"
+[plugins.translation.agent_reasoning]
+command = ["python3", "/tmp/translate.py"]
+timeout_ms = 1234
+
+[profiles.no_translate.plugins.translation.agent_reasoning]
 command = []
 "#;
         let cfg: ConfigToml = toml::from_str(toml).expect("TOML deserialization should succeed");

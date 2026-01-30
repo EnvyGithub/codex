@@ -3,6 +3,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
+use std::collections::HashMap;
+use toml::Value as TomlValue;
+
 use crate::config::types::Personality;
 use crate::protocol::AskForApproval;
 use codex_protocol::config_types::ReasoningSummary;
@@ -40,7 +43,15 @@ pub struct ConfigProfile {
     pub tools_view_image: Option<bool>,
     pub web_search: Option<WebSearchMode>,
     pub analytics: Option<crate::config::types::AnalyticsConfigToml>,
+    /// 插件配置（通用命名空间）。
+    #[serde(default)]
+    #[schemars(schema_with = "crate::config::schema::plugins_schema")]
+    pub plugins: HashMap<String, TomlValue>,
     /// 翻译相关配置（可在 profile 内覆盖全局配置）。
+    ///
+    /// 说明：翻译配置已迁移到 `[profiles.<name>.plugins.translation]` 命名空间；旧路径仅用于兼容与迁移。
+    /// 为降低主 schema 的 churn，这里不写入 `config.schema.json`。
+    #[schemars(skip)]
     pub translation: Option<crate::config::types::TranslationToml>,
     /// Optional feature toggles scoped to this profile.
     #[serde(default)]

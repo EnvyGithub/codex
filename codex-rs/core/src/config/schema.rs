@@ -52,6 +52,25 @@ pub(crate) fn mcp_servers_schema(schema_gen: &mut SchemaGenerator) -> Schema {
     Schema::Object(object)
 }
 
+/// `[plugins]` 插件命名空间的通用 schema。
+///
+/// 设计目标：主 schema 只表达“通用插件命名空间”，避免把某个插件（如 translation）
+/// 的细节写入 core 的 schema 生成物，从而降低后续与 upstream 合并时的 churn。
+pub(crate) fn plugins_schema(_schema_gen: &mut SchemaGenerator) -> Schema {
+    let mut object = SchemaObject {
+        instance_type: Some(InstanceType::Object.into()),
+        ..Default::default()
+    };
+
+    let validation = ObjectValidation {
+        additional_properties: Some(Box::new(Schema::Bool(true))),
+        ..Default::default()
+    };
+    object.object = Some(Box::new(validation));
+
+    Schema::Object(object)
+}
+
 /// Build the config schema for `config.toml`.
 pub fn config_schema() -> RootSchema {
     SchemaSettings::draft07()

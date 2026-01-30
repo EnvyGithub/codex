@@ -9,8 +9,15 @@ mod external_command;
 
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::HashSet;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use toml::Value as TomlValue;
 
 use crate::config::types::AgentReasoningTranslationConfig;
+use crate::config::types::DEFAULT_AGENT_REASONING_TRANSLATION_TIMEOUT_MS;
+use crate::config::types::DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS;
+use crate::config::types::TranslationToml;
 
 /// 当前翻译协议版本。
 pub const TRANSLATION_SCHEMA_VERSION: u32 = 1;
@@ -178,6 +185,212 @@ pub async fn translate_text(
 pub fn format_bilingual_title(original: &str, translated: &str) -> String {
     // 用户侧常见期望格式：`Thinking(思考中)`，便于在等宽终端中对齐显示。
     format!("{original}({translated})")
+}
+
+#[derive(Debug, Clone)]
+struct AgentReasoningTranslationSettingsToml {
+    command: Option<Vec<String>>,
+    timeout_ms: Option<u64>,
+    ui_max_wait_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentReasoningTranslationPluginToml {
+    command: Option<Vec<String>>,
+    timeout_ms: Option<u64>,
+    ui_max_wait_ms: Option<u64>,
+}
+
+pub(crate) struct AgentReasoningTranslationConfigSources<'a> {
+    pub active_profile_name: Option<&'a str>,
+
+    /// `[plugins.translation]` 的 TOML 值（若存在）。
+    pub global_plugins_translation: Option<&'a TomlValue>,
+    /// `[translation]` 的解析结果（若存在，legacy）。
+    pub global_legacy_translation: Option<&'a TranslationToml>,
+
+    /// `[profiles.<name>.plugins.translation]` 的 TOML 值（若存在）。
+    pub profile_plugins_translation: Option<&'a TomlValue>,
+    /// `[profiles.<name>.translation]` 的解析结果（若存在，legacy）。
+    pub profile_legacy_translation: Option<&'a TranslationToml>,
+}
+
+pub(crate) fn resolve_agent_reasoning_translation_config(
+    sources: AgentReasoningTranslationConfigSources<'_>,
+) -> std::io::Result<Option<AgentReasoningTranslationConfig>> {
+    let global_new_present =
+        plugins_translation_has_agent_reasoning(sources.global_plugins_translation);
+    let global_old_present = sources
+        .global_legacy_translation
+        .and_then(|translation| translation.agent_reasoning.as_ref())
+        .is_some();
+    if global_new_present && global_old_present {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "同一作用域禁止同时配置 `[plugins.translation.agent_reasoning]` 与 `[translation.agent_reasoning]`；请迁移到新路径并删除旧路径。",
+        ));
+    }
+
+    let profile_name = sources.active_profile_name;
+    let profile_new_present =
+        plugins_translation_has_agent_reasoning(sources.profile_plugins_translation);
+    let profile_old_present = sources
+        .profile_legacy_translation
+        .and_then(|translation| translation.agent_reasoning.as_ref())
+        .is_some();
+    if profile_new_present && profile_old_present {
+        let Some(profile_name) = profile_name else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "同一作用域禁止同时配置 profile 的新旧翻译配置；请迁移到新路径并删除旧路径。",
+            ));
+        };
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "同一作用域禁止同时配置 `[profiles.{profile_name}.plugins.translation.agent_reasoning]` 与 `[profiles.{profile_name}.translation.agent_reasoning]`；请迁移到新路径并删除旧路径。",
+            ),
+        ));
+    }
+
+    let global_new = parse_agent_reasoning_translation_from_plugins_translation(
+        "plugins.translation",
+        sources.global_plugins_translation,
+    )?;
+    let global_old = sources
+        .global_legacy_translation
+        .and_then(|translation| translation.agent_reasoning.as_ref())
+        .map(|settings| AgentReasoningTranslationSettingsToml {
+            command: settings.command.clone(),
+            timeout_ms: settings.timeout_ms,
+            ui_max_wait_ms: settings.ui_max_wait_ms,
+        });
+    if global_new.is_none() && global_old.is_some() {
+        warn_deprecated_translation_config_once(
+            "[translation.agent_reasoning]",
+            "[plugins.translation.agent_reasoning]",
+        );
+    }
+
+    let profile_scope = profile_name.map(|name| format!("profiles.{name}.plugins.translation"));
+    let profile_new = parse_agent_reasoning_translation_from_plugins_translation(
+        profile_scope
+            .as_deref()
+            .unwrap_or("profiles.<unknown>.plugins.translation"),
+        sources.profile_plugins_translation,
+    )?;
+    let profile_old = sources
+        .profile_legacy_translation
+        .and_then(|translation| translation.agent_reasoning.as_ref())
+        .map(|settings| AgentReasoningTranslationSettingsToml {
+            command: settings.command.clone(),
+            timeout_ms: settings.timeout_ms,
+            ui_max_wait_ms: settings.ui_max_wait_ms,
+        });
+    if profile_new.is_none()
+        && profile_old.is_some()
+        && let Some(profile_name) = profile_name
+    {
+        warn_deprecated_translation_config_once(
+            &format!("[profiles.{profile_name}.translation.agent_reasoning]"),
+            &format!("[profiles.{profile_name}.plugins.translation.agent_reasoning]"),
+        );
+    }
+
+    let global = global_new.or(global_old);
+    let profile = profile_new.or(profile_old);
+
+    let command = profile
+        .as_ref()
+        .and_then(|settings| settings.command.clone())
+        .or_else(|| {
+            global
+                .as_ref()
+                .and_then(|settings| settings.command.clone())
+        });
+
+    let timeout_ms = profile
+        .as_ref()
+        .and_then(|settings| settings.timeout_ms)
+        .or_else(|| global.as_ref().and_then(|settings| settings.timeout_ms))
+        .unwrap_or(DEFAULT_AGENT_REASONING_TRANSLATION_TIMEOUT_MS);
+
+    let ui_max_wait_ms = profile
+        .as_ref()
+        .and_then(|settings| settings.ui_max_wait_ms)
+        .or_else(|| global.as_ref().and_then(|settings| settings.ui_max_wait_ms))
+        .unwrap_or(DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS);
+
+    Ok(match command {
+        Some(command) if !command.is_empty() => Some(AgentReasoningTranslationConfig {
+            command,
+            timeout: std::time::Duration::from_millis(timeout_ms),
+            ui_max_wait: std::time::Duration::from_millis(ui_max_wait_ms),
+        }),
+        _ => None,
+    })
+}
+
+fn plugins_translation_has_agent_reasoning(plugins_translation: Option<&TomlValue>) -> bool {
+    match plugins_translation {
+        Some(TomlValue::Table(table)) => table.contains_key("agent_reasoning"),
+        _ => false,
+    }
+}
+
+fn parse_agent_reasoning_translation_from_plugins_translation(
+    scope: &str,
+    plugins_translation: Option<&TomlValue>,
+) -> std::io::Result<Option<AgentReasoningTranslationSettingsToml>> {
+    let Some(plugins_translation) = plugins_translation else {
+        return Ok(None);
+    };
+    let TomlValue::Table(table) = plugins_translation else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("解析 `[{scope}]` 失败：期望 table。"),
+        ));
+    };
+
+    let Some(agent_reasoning) = table.get("agent_reasoning") else {
+        return Ok(None);
+    };
+
+    let path = format!("[{scope}.agent_reasoning]");
+    let parsed: AgentReasoningTranslationPluginToml =
+        agent_reasoning.clone().try_into().map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("解析 `{path}` 失败: {err}"),
+            )
+        })?;
+
+    Ok(Some(AgentReasoningTranslationSettingsToml {
+        command: parsed.command,
+        timeout_ms: parsed.timeout_ms,
+        ui_max_wait_ms: parsed.ui_max_wait_ms,
+    }))
+}
+
+fn warn_deprecated_translation_config_once(old_path: &str, new_path: &str) {
+    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+
+    let mut warned = match warned.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                "弃用翻译配置 warning 的去重锁发生 poisoning（可能因为之前线程 panic）；将继续使用已有数据以避免再次崩溃。"
+            );
+            poisoned.into_inner()
+        }
+    };
+    if warned.insert(old_path.to_string()) {
+        tracing::warn!(
+            "检测到已弃用的翻译配置 {old_path}。请迁移到 {new_path}。同一作用域新旧配置不能共存。"
+        );
+    }
 }
 
 #[cfg(test)]
