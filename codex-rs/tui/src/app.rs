@@ -1484,17 +1484,6 @@ impl App {
                     }
                 }
             }
-            AppEvent::AgentReasoningBodyTranslated {
-                request_id,
-                thread_id,
-                title,
-                translated,
-                error,
-            } => {
-                self.chat_widget.on_agent_reasoning_body_translated(
-                    request_id, thread_id, title, translated, error,
-                );
-            }
             AppEvent::StartCommitAnimation => {
                 if self
                     .commit_anim_running

@@ -29,6 +29,33 @@ struct AgentReasoningBodyTranslationBarrier {
 }
 
 #[derive(Debug)]
+pub(super) struct AgentReasoningBodyTranslationResult {
+    request_id: u64,
+    thread_id: ThreadId,
+    title: Option<String>,
+    translated: Option<String>,
+    error: Option<String>,
+}
+
+impl AgentReasoningBodyTranslationResult {
+    pub(super) fn new(
+        request_id: u64,
+        thread_id: ThreadId,
+        title: Option<String>,
+        translated: Option<String>,
+        error: Option<String>,
+    ) -> Self {
+        Self {
+            request_id,
+            thread_id,
+            title,
+            translated,
+            error,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct AgentReasoningTranslationOrchestrator {
     /// “主题标题原文 -> 主题标题译文”的缓存。
     ///
@@ -44,6 +71,11 @@ pub(crate) struct AgentReasoningTranslationOrchestrator {
     deferred_history_cells: VecDeque<Box<dyn HistoryCell>>,
     /// 单调-ish 序列号，用于把异步回传与当前 barrier 绑定（防串台/防乱序）。
     body_translation_seq: u64,
+    /// 异步翻译结果回传（去 AppEvent 化）。
+    body_translation_results_tx:
+        tokio::sync::mpsc::UnboundedSender<AgentReasoningBodyTranslationResult>,
+    body_translation_results_rx:
+        tokio::sync::mpsc::UnboundedReceiver<AgentReasoningBodyTranslationResult>,
 }
 
 pub(crate) struct OnBodyTranslatedResult {
@@ -53,12 +85,16 @@ pub(crate) struct OnBodyTranslatedResult {
 
 impl Default for AgentReasoningTranslationOrchestrator {
     fn default() -> Self {
+        let (body_translation_results_tx, body_translation_results_rx) =
+            tokio::sync::mpsc::unbounded_channel();
         Self {
             title_translation_cache: HashMap::new(),
             current_reasoning_title_raw: None,
             body_translation_barrier: None,
             deferred_history_cells: VecDeque::new(),
             body_translation_seq: 0,
+            body_translation_results_tx,
+            body_translation_results_rx,
         }
     }
 }
@@ -89,7 +125,6 @@ impl AgentReasoningTranslationOrchestrator {
         config: Option<&AgentReasoningTranslationConfig>,
         thread_id: Option<ThreadId>,
         full_reasoning: String,
-        app_event_tx: AppEventSender,
         frame_requester: FrameRequester,
     ) {
         let Some(config) = config.cloned() else {
@@ -112,11 +147,12 @@ impl AgentReasoningTranslationOrchestrator {
             config.ui_max_wait,
             thread_id,
             title.clone(),
-            frame_requester,
+            frame_requester.clone(),
         ) else {
             return;
         };
 
+        let result_tx = self.body_translation_results_tx.clone();
         // 仅调用一次翻译：把 “**标题** + 正文” 一起交给外部翻译器。
         // 这样可以在同一次返回中拿到“主题译文 + 正文译文”，避免标题/正文分别调用带来的成本与延迟。
         tokio::spawn(async move {
@@ -127,37 +163,79 @@ impl AgentReasoningTranslationOrchestrator {
             )
             .await;
 
-            match result {
-                Ok(translated) => app_event_tx.send(AppEvent::AgentReasoningBodyTranslated {
+            let msg = match result {
+                Ok(translated) => AgentReasoningBodyTranslationResult::new(
                     request_id,
                     thread_id,
                     title,
-                    translated: Some(translated),
-                    error: None,
-                }),
-                Err(err) => app_event_tx.send(AppEvent::AgentReasoningBodyTranslated {
+                    Some(translated),
+                    None,
+                ),
+                Err(err) => AgentReasoningBodyTranslationResult::new(
                     request_id,
                     thread_id,
                     title,
-                    translated: None,
-                    error: Some(err.to_string()),
-                }),
+                    None,
+                    Some(err.to_string()),
+                ),
             };
+
+            let _ = result_tx.send(msg);
+            frame_requester.schedule_frame();
         });
     }
 
-    pub(crate) fn on_body_translated(
+    pub(crate) fn drain_body_translation_results(
         &mut self,
-        request_id: u64,
-        thread_id: ThreadId,
-        title: Option<String>,
-        translated: Option<String>,
-        error: Option<String>,
         active_thread_id: Option<ThreadId>,
         config: Option<&AgentReasoningTranslationConfig>,
         app_event_tx: &AppEventSender,
         frame_requester: FrameRequester,
     ) -> OnBodyTranslatedResult {
+        let mut out = OnBodyTranslatedResult {
+            status_header_update: None,
+            needs_redraw: false,
+        };
+
+        loop {
+            match self.body_translation_results_rx.try_recv() {
+                Ok(msg) => {
+                    let result = self.on_body_translated(
+                        msg,
+                        active_thread_id,
+                        config,
+                        app_event_tx,
+                        frame_requester.clone(),
+                    );
+                    if result.status_header_update.is_some() {
+                        out.status_header_update = result.status_header_update;
+                    }
+                    out.needs_redraw |= result.needs_redraw;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+
+        out
+    }
+
+    pub(crate) fn on_body_translated(
+        &mut self,
+        msg: AgentReasoningBodyTranslationResult,
+        active_thread_id: Option<ThreadId>,
+        config: Option<&AgentReasoningTranslationConfig>,
+        app_event_tx: &AppEventSender,
+        frame_requester: FrameRequester,
+    ) -> OnBodyTranslatedResult {
+        let AgentReasoningBodyTranslationResult {
+            request_id,
+            thread_id,
+            title,
+            translated,
+            error,
+        } = msg;
+
         let Some(barrier) = self.body_translation_barrier.as_ref() else {
             // 已超时释放，或会话已切换；为保证“译文紧跟原文”，这里不再追加晚到的译文。
             return OnBodyTranslatedResult {
@@ -310,7 +388,6 @@ impl AgentReasoningTranslationOrchestrator {
                         config,
                         active_thread_id,
                         full_reasoning,
-                        app_event_tx.clone(),
                         frame_requester.clone(),
                     );
                     if self.body_translation_barrier.is_some() {

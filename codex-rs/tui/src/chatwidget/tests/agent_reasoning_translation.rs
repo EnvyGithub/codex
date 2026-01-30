@@ -1,5 +1,7 @@
 use super::*;
 
+use super::super::agent_reasoning_translation::AgentReasoningBodyTranslationResult;
+
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::history_cell;
@@ -44,11 +46,13 @@ async fn reasoning_body_translation_barrier_keeps_translation_adjacent() {
 
     // 模拟译文返回（不依赖真实外部翻译器）。
     let _ = orchestrator.on_body_translated(
-        request_id,
-        thread_id,
-        Some("Thinking".to_string()),
-        Some("**思考中**\n\n这里是中文翻译。".to_string()),
-        None,
+        AgentReasoningBodyTranslationResult::new(
+            request_id,
+            thread_id,
+            Some("Thinking".to_string()),
+            Some("**思考中**\n\n这里是中文翻译。".to_string()),
+            None,
+        ),
         Some(thread_id),
         None,
         &app_event_tx,
@@ -76,6 +80,76 @@ async fn reasoning_body_translation_barrier_keeps_translation_adjacent() {
     assert!(
         combined.get(2).is_some_and(|s| s.contains("AFTER_CELL")),
         "expected buffered cell to flush after translation: {combined:?}"
+    );
+}
+
+#[tokio::test]
+async fn unified_exec_wait_streak_respects_reasoning_translation_barrier() {
+    use std::time::Duration;
+
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+    let frame_requester = chat.frame_requester.clone();
+
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+
+    // 先落盘推理摘要（对应真实运行时的 on_agent_reasoning_final）。
+    chat.app_event_tx.send(AppEvent::InsertHistoryCell(
+        history_cell::new_reasoning_summary_block("**Thinking**\n\nFirst reasoning.".to_string()),
+    ));
+
+    // 开启 barrier：在译文生成完成前，后续 history insert 必须被缓冲，避免插队。
+    let request_id = chat
+        .agent_reasoning_translation
+        .begin_body_translation_barrier_for_tests(
+            Duration::from_secs(5),
+            thread_id,
+            Some("Thinking".to_string()),
+            frame_requester.clone(),
+        )
+        .expect("expected barrier to start");
+
+    // 该输出来自 unified exec wait streak 的 flush；若绕过 barrier，会插入到译文之前导致错位。
+    chat.unified_exec_wait_streak = Some(UnifiedExecWaitStreak::new(
+        "proc-1".to_string(),
+        Some("sleep 1".to_string()),
+    ));
+    chat.flush_unified_exec_wait_streak();
+
+    // 模拟译文返回：应当先插入译文，再 flush 掉 barrier 期间缓冲的 unified exec cell。
+    let _ = chat.agent_reasoning_translation.on_body_translated(
+        AgentReasoningBodyTranslationResult::new(
+            request_id,
+            thread_id,
+            Some("Thinking".to_string()),
+            Some("**思考中**\n\n这里是中文翻译。".to_string()),
+            None,
+        ),
+        Some(thread_id),
+        None,
+        &chat.app_event_tx,
+        frame_requester,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let combined = cells
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>();
+
+    fn find_idx(haystack: &[String], needle: &str) -> usize {
+        haystack
+            .iter()
+            .position(|s| s.contains(needle))
+            .unwrap_or_else(|| panic!("missing {needle:?} in {haystack:?}"))
+    }
+
+    let idx_reasoning = find_idx(&combined, "First reasoning");
+    let idx_translation = find_idx(&combined, "这里是中文翻译");
+    let idx_unified_exec = find_idx(&combined, "Interacted with background terminal");
+    assert!(
+        idx_reasoning < idx_translation && idx_translation < idx_unified_exec,
+        "unexpected insertion order: {combined:?}"
     );
 }
 
@@ -213,11 +287,13 @@ async fn reasoning_body_translation_ignores_late_results_from_previous_barrier()
 
     // 旧译文晚到：不应当打断当前 barrier，也不应插入到历史中。
     let late = orchestrator.on_body_translated(
-        request_id_1,
-        thread_id,
-        Some("Thinking".to_string()),
-        Some("**旧**\n\n旧译文".to_string()),
-        None,
+        AgentReasoningBodyTranslationResult::new(
+            request_id_1,
+            thread_id,
+            Some("Thinking".to_string()),
+            Some("**旧**\n\n旧译文".to_string()),
+            None,
+        ),
         Some(thread_id),
         None,
         &app_event_tx,
@@ -232,11 +308,13 @@ async fn reasoning_body_translation_ignores_late_results_from_previous_barrier()
 
     // 当前译文到达：应当正常结束 barrier 并落盘。
     let current = orchestrator.on_body_translated(
-        request_id_2,
-        thread_id,
-        Some("Thinking".to_string()),
-        Some("**新**\n\n新译文".to_string()),
-        None,
+        AgentReasoningBodyTranslationResult::new(
+            request_id_2,
+            thread_id,
+            Some("Thinking".to_string()),
+            Some("**新**\n\n新译文".to_string()),
+            None,
+        ),
         Some(thread_id),
         None,
         &app_event_tx,
@@ -304,7 +382,6 @@ async fn reasoning_body_translation_barrier_does_not_skip_deferred_reasoning_blo
         Some(&config),
         Some(thread_id),
         reasoning_1,
-        app_event_tx.clone(),
         frame_requester.clone(),
     );
 
@@ -332,42 +409,30 @@ async fn reasoning_body_translation_barrier_does_not_skip_deferred_reasoning_blo
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     while tokio::time::Instant::now() < deadline && (translation_cells_seen < 2 || !saw_after_2) {
+        let tick = Duration::from_millis(25);
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let Ok(Some(ev)) = tokio::time::timeout(remaining, rx.recv()).await else {
-            break;
+        // 模拟 Draw tick：在任何 overlay 场景下也会发生 drain（见 App::handle_tui_event）。
+        let _ = orchestrator.drain_body_translation_results(
+            Some(thread_id),
+            Some(&config),
+            &app_event_tx,
+            frame_requester.clone(),
+        );
+
+        let Ok(Some(ev)) = tokio::time::timeout(std::cmp::min(remaining, tick), rx.recv()).await
+        else {
+            continue;
         };
 
-        match ev {
-            AppEvent::InsertHistoryCell(cell) => {
-                let s = lines_to_single_string(&cell.display_lines(80));
-                if s.contains("这里是中文翻译") {
-                    translation_cells_seen += 1;
-                }
-                if s.contains("AFTER_2") {
-                    saw_after_2 = true;
-                }
-                combined.push(s);
+        if let AppEvent::InsertHistoryCell(cell) = ev {
+            let s = lines_to_single_string(&cell.display_lines(80));
+            if s.contains("这里是中文翻译") {
+                translation_cells_seen += 1;
             }
-            AppEvent::AgentReasoningBodyTranslated {
-                request_id,
-                thread_id,
-                title,
-                translated,
-                error,
-            } => {
-                let _ = orchestrator.on_body_translated(
-                    request_id,
-                    thread_id,
-                    title,
-                    translated,
-                    error,
-                    Some(thread_id),
-                    Some(&config),
-                    &app_event_tx,
-                    frame_requester.clone(),
-                );
+            if s.contains("AFTER_2") {
+                saw_after_2 = true;
             }
-            _ => {}
+            combined.push(s);
         }
     }
 

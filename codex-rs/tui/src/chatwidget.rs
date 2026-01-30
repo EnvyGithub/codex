@@ -766,8 +766,7 @@ impl ChatWidget {
         };
         self.needs_final_message_separator = true;
         let cell = history_cell::new_unified_exec_interaction(wait.command_display, String::new());
-        self.app_event_tx
-            .send(AppEvent::InsertHistoryCell(Box::new(cell)));
+        self.emit_history_cell(Box::new(cell));
         self.restore_reasoning_status_header();
     }
 
@@ -1018,7 +1017,6 @@ impl ChatWidget {
                     self.config.agent_reasoning_translation.as_ref(),
                     self.thread_id,
                     full_reasoning,
-                    self.app_event_tx.clone(),
                     self.frame_requester.clone(),
                 );
         }
@@ -1032,33 +1030,6 @@ impl ChatWidget {
         self.full_reasoning_buffer.push_str(&self.reasoning_buffer);
         self.full_reasoning_buffer.push_str("\n\n");
         self.reasoning_buffer.clear();
-    }
-
-    pub(crate) fn on_agent_reasoning_body_translated(
-        &mut self,
-        request_id: u64,
-        thread_id: ThreadId,
-        title: Option<String>,
-        translated: Option<String>,
-        error: Option<String>,
-    ) {
-        let result = self.agent_reasoning_translation.on_body_translated(
-            request_id,
-            thread_id,
-            title,
-            translated,
-            error,
-            self.thread_id,
-            self.config.agent_reasoning_translation.as_ref(),
-            &self.app_event_tx,
-            self.frame_requester.clone(),
-        );
-        if let Some(status_header) = result.status_header_update {
-            self.set_status_header(status_header);
-        }
-        if result.needs_redraw {
-            self.request_redraw();
-        }
     }
 
     // Raw reasoning uses the same flow as summarized reasoning
@@ -3253,6 +3224,21 @@ impl ChatWidget {
     }
 
     pub(crate) fn maybe_flush_agent_reasoning_body_translation_barrier_timeout(&mut self) {
+        let result = self
+            .agent_reasoning_translation
+            .drain_body_translation_results(
+                self.thread_id,
+                self.config.agent_reasoning_translation.as_ref(),
+                &self.app_event_tx,
+                self.frame_requester.clone(),
+            );
+        if let Some(status_header) = result.status_header_update {
+            self.set_status_header(status_header);
+        }
+        if result.needs_redraw {
+            self.request_redraw();
+        }
+
         let flushed = self.agent_reasoning_translation.maybe_flush_timeout(
             self.config.agent_reasoning_translation.as_ref(),
             self.thread_id,
