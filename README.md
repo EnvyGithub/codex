@@ -52,7 +52,7 @@ ui_max_wait_ms = 5000
 
 ### Using Codex with your ChatGPT plan
 
-> 兼容说明：旧路径 `[translation.agent_reasoning]` 仍可用但已弃用（启动会 warning）；同一作用域新旧配置不能共存（会直接报错并提示迁移）。
+> 兼容说明：旧路径 `[translation.agent_reasoning]` 仍可用但已弃用（启动会 warning）；同一层级（root 或同一个 profile）新旧配置不能共存（会直接报错并提示迁移）。
 
 详细说明见：`docs/translation.md`。
 

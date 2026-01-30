@@ -49,7 +49,7 @@ Then run:
 ./target/release/codex
 ```
 
-To enable the translation hook, configure `plugins.translation.agent_reasoning.command` in `~/.codex/config.toml` (see `docs/translation.md`).
+To enable the translation hook, configure `plugins.translation.agent_reasoning.command` (i.e. the `[plugins.translation.agent_reasoning]` table) in `~/.codex/config.toml` (see `docs/translation.md`). Legacy `translation.agent_reasoning` is still supported but deprecated; do not define both in the same scope (root or the same profile) — it will error with a migration hint.
 
 ### Maintainers: keep in sync with upstream releases
 

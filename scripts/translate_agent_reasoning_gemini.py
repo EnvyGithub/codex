@@ -302,9 +302,9 @@ def main() -> int:
 
     if translated is None:
         sys.stderr.write(f"translation_failed:{last_err}\n")
-            sys.stderr.write(
+        sys.stderr.write(
             "hint: try increasing CODEX_GEMINI_MAX_OUTPUT_TOKENS and/or plugins.translation.agent_reasoning.timeout_ms\n"
-            )
+        )
         return 2
 
     resp = {"schema_version": 1, "text": translated}

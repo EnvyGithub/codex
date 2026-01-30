@@ -44,5 +44,5 @@ Ctrl+C/Ctrl+D quitting uses a ~1 second double-press hint (`ctrl + c again to qu
     - `command = [...]`：外部翻译器命令（argv）
     - `timeout_ms`：外部命令执行超时（毫秒）
     - `ui_max_wait_ms`：TUI 对齐等待上限（毫秒；控制“译文紧跟原文”的缓冲等待时间）
-  - 旧路径兼容但弃用：`[translation.agent_reasoning]`（启动会 warning；同一作用域与新路径共存会报错）
+  - 旧路径兼容但弃用：`[translation.agent_reasoning]`（启动会 warning；同一层级（root 或同一个 profile）与新路径共存会报错）
   - 环境变量 `CODEX_TUI_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS` 可覆盖 `ui_max_wait_ms`

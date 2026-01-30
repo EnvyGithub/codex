@@ -96,7 +96,7 @@ rg -n -S "API_KEY|ACCESS_KEY|SECRET_KEY|BEGIN (RSA|OPENSSH) PRIVATE KEY|ssh-rsa|
 建议：
 
 - 检查 `docs/translation.md` 中提到的脚本文件路径都存在
-- 检查 `docs/config.md` 中提到的 `plugins` 命名空间已进入 schema（schema 只描述通用 `plugins`；翻译插件细节以 `docs/translation.md` 为准）
+- 检查 `docs/config.md` 中提到的 `plugins` 命名空间已进入 schema（schema 只描述通用 `plugins`，不会校验 `plugins.*` 下的插件字段；翻译插件会在运行时严格解析并在未知字段时报错；细节以 `docs/translation.md` 为准）
 
 ### 3) 最小可运行性验证
 
