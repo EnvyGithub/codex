@@ -280,7 +280,12 @@ pub fn normalize_pasted_path(pasted: &str) -> Option<PathBuf> {
     None
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
+pub(crate) fn is_probably_wsl() -> bool {
+    false
+}
+
+#[cfg(all(target_os = "linux", not(test)))]
 pub(crate) fn is_probably_wsl() -> bool {
     // Primary: Check /proc/version for "microsoft" or "WSL" (most reliable for standard WSL).
     if let Ok(version) = std::fs::read_to_string("/proc/version") {
