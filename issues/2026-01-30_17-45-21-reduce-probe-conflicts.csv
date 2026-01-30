@@ -1,0 +1,16 @@
+ID,Title,Description,Acceptance,Test_Method,Tools,Dev_Status,Review1_Status,Regression_Status,Files,Dependencies,Notes
+P1,Baseline：记录 probe 输出与冲突根因,复跑 merge-tree 冲突探针并记录 baseline（时间戳+HEAD+tag SHA+CONFLICT 列表）；对 codex-rs/Cargo.toml 与 codex-rs/core/src/lib.rs 做上游演进对比，定位冲突 hunk 根因,产出可复核 baseline：probe 命令与输出摘要 + 冲突根因分析要点（哪些段落是上游热点、我们差异落点）,"运行并记录：git merge-tree --write-tree --messages HEAD rust-v0.93.0-alpha.17 | rg \""^CONFLICT\""；并用 git show/git diff 做三方对比",git/shell;rg/shell,DONE,TODO,TODO,codex-rs/Cargo.toml;codex-rs/core/src/lib.rs;plan/2026-01-30_17-45-21-reduce-probe-conflicts.md,none,"基线=rust-v0.92.0；探针目标=rust-v0.93.0-alpha.17（仅趋势预测）；固定 probe 命令以便对比；不改历史 | 2026-01-30 18:02:17 UTC+08:00 P1 基线（2026-01-30T17:57:02+08:00）：HEAD=a51c12d99；probe_tag=rust-v0.93.0-alpha.17(f7b71444e9)；CONFLICT=codex-rs/Cargo.toml、codex-rs/core/src/lib.rs。
+根因-1 Cargo.toml：merge-base=ab99df069(version=0.0.0)；当前分支=0.92.0；alpha_tag=0.93.0-alpha.17；同一行三方不同→content conflict。
+根因-2 core/src/lib.rs：我们在 models_manager 附近插入 pub mod translation；alpha_tag 在同一段落新增 mod transport_manager/mentions 等模块声明，导致同一 hunk 重叠→content conflict。"
+P2,降冲突：对齐 codex-rs/Cargo.toml 结构,基于 P1 根因分析对 Cargo workspace/依赖/feature 结构做最小入侵对齐，目标消除 probe 中的 Cargo.toml 冲突且不引入新冲突,probe 输出不再包含 codex-rs/Cargo.toml 且 CONFLICT 总数不增加；改动有明确“顺上游结构”的理由,"每次调整后复跑：git merge-tree --write-tree --messages HEAD rust-v0.93.0-alpha.17 | rg \""^CONFLICT\""；记录对比",git/shell,DONE,TODO,TODO,codex-rs/Cargo.toml,P1,"禁止无意义重排；只做与冲突根因直接相关的结构对齐 | 2026-01-30 18:05:04 UTC+08:00 P2 变更：codex-rs/Cargo.toml [workspace.package] version 由 0.92.0 调整为 0.0.0（对齐上游主线结构，避免与 alpha tag 在同一行三方分歧）。
+probe 复测（2026-01-30T18:04:48+08:00）：HEAD=786984f92；CONFLICT=仅剩 codex-rs/core/src/lib.rs（Cargo.toml 已从冲突列表消失）。"
+P3,降冲突：对齐 codex-rs/core/src/lib.rs 结构,基于 P1 根因分析对 core/src/lib.rs 的 mod/pub use/feature gate 组织做最小入侵对齐，目标消除 probe 中的 lib.rs 冲突且不引入新冲突,probe 输出不再包含 codex-rs/core/src/lib.rs 且 CONFLICT 总数不增加；改动可解释且可回滚,每次调整后复跑 probe 并记录对比；必要时用 git show rust-v0.93.0-alpha.17:codex-rs/core/src/lib.rs 对齐结构,git/shell,DONE,TODO,TODO,codex-rs/core/src/lib.rs,P2,"避免改变翻译插件行为；只调整结构/落点以顺上游演进 | 2026-01-30 18:06:22 UTC+08:00 P3 变更：codex-rs/core/src/lib.rs 将 pub mod translation 声明从 models_manager 附近移动到 review_prompts 段落附近（仅移动落点，不改对外 API/实现）。
+probe 复测（2026-01-30T18:06:00+08:00）：HEAD=5dcac73bd；git merge-tree | rg ""^CONFLICT"" 输出为空（CONFLICT=0）。"
+P4,回归与复测：白名单命令 + 最终 probe 对比,在 P2/P3 完成后执行白名单回归集合并复跑 probe，记录最终对比结论（冲突项=0 或至少下降且解释原因）,白名单 5 条命令全部 exit=0；最终 probe 输出 CONFLICT=0（或下降且不新增）；Notes 记录输出摘要,执行（cd codex-rs）：just fmt；cargo test -p codex-core translation；cargo test -p codex-exec；cargo build -p codex-cli；cargo test -p codex-tui；并复跑 probe,git/shell;cargo/shell,DONE,TODO,TODO,codex-rs,P3,"测试严格白名单；失败即停；记录 pass/fail 与关键输出 | 2026-01-30 18:22:48 UTC+08:00 P4 最终 probe（2026-01-30T18:22:23+08:00）：HEAD=e60c24004；git merge-tree | rg ""^CONFLICT"" 输出为空（CONFLICT=0）。
+白名单回归（最终均为 exit=0）：
+- just fmt
+- cargo test -p codex-core translation
+- cargo test -p codex-exec
+- cargo build -p codex-cli
+- cargo test -p codex-tui
+过程备注：首次 cargo test -p codex-tui 因 workspace version=0.0.0 导致 UI 版本显示变更、触发 status 快照失败；已通过将 codex-tui crate version 显式钉到 0.92.0（并同步 Cargo.lock）修复，随后复跑 codex-tui 测试通过。 | 2026-01-30 19:22:08 UTC+08:00 补充复测：在当前 HEAD=e60c24004 上再次运行（cd codex-rs）cargo test -p codex-core translation，exit=0（6 tests passed）。"
