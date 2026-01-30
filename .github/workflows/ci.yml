@@ -2,7 +2,7 @@ name: ci
 
 on:
   pull_request: {}
-  push: { branches: [main, feat/agent-reasoning-translation-plugin] }
+  push: { branches: [main] }
 
 jobs:
   build-test:

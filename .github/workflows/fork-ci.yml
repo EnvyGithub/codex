@@ -1,0 +1,35 @@
+name: fork-ci
+
+on:
+  push:
+    branches:
+      - feat/agent-reasoning-translation-plugin
+  pull_request:
+    branches:
+      - feat/agent-reasoning-translation-plugin
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Build and Test (Ubuntu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@1.92
+
+      - name: cargo test -p codex-core translation
+        run: cargo test -p codex-core translation
+
+      - name: cargo test -p codex-exec
+        run: cargo test -p codex-exec
+
+      - name: cargo build -p codex-cli
+        run: cargo build -p codex-cli
+
+      - name: cargo test -p codex-tui
+        run: cargo test -p codex-tui

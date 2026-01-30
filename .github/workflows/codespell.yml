@@ -4,9 +4,9 @@ name: Codespell
 
 on:
   push:
-    branches: [main, feat/agent-reasoning-translation-plugin]
+    branches: [main]
   pull_request:
-    branches: [main, feat/agent-reasoning-translation-plugin]
+    branches: [main]
 
 permissions:
   contents: read
