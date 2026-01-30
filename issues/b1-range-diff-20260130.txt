@@ -1,0 +1,2648 @@
+# B1 range-diff 归档
+#
+# created_at: 2026-01-30
+# pre-rebase: 3cd0af54d2acfaa08f4420ae5e35f5d2a27825c4
+# post-rebase(eq): aff96fc3abcaca5b229126394a318e0a511e7a0f
+# command: git range-diff rust-v0.92.0^{}..3cd0af54d2ac rust-v0.92.0^{}..aff96fc3abca
+#
+ 1:  8343a80c8 !  1:  635a42b28 feat(core): 推理译文外部命令插件
+    @@ Metadata
+     Author: envy <envy@example.com>
+     
+      ## Commit message ##
+    -    feat(core): 推理译文外部命令插件
+    +    feat(translation): 引入推理译文插件并接入 TUI
+     
+    -    新增通过外部命令翻译 AgentReasoning（stdin/stdout JSON），默认关闭，避免内置在线服务带来的隐私/依赖耦合。
+    -
+    -    同时补充配置项 [translation.agent_reasoning]、示例脚本与文档，便于按需接入 Gemini/OpenAI 兼容接口。
+    -
+    -    测试：cargo test -p codex-core translation
+    -
+    -    风险：低（默认关闭；启用后推理内容会被送入外部命令/出网由用户配置决定）
+    +    做了什么：在 core 增加外部命令翻译器，exec 支持译文异步输出，TUI/TUI2 支持推理译文紧贴展示，并补充 ui_max_wait_ms 配置与说明。
+    +    为什么：以默认关闭/可配置的方式提供“译文紧贴原文”的体验，同时不阻塞 TUI 主循环。
+     
+      ## codex-rs/common/src/config_summary.rs ##
+     @@
+    @@ codex-rs/common/src/config_summary.rs: pub fn create_config_summary_entries(conf
+          entries
+      }
+     
+    + ## codex-rs/core/Cargo.toml ##
+    +@@ codex-rs/core/Cargo.toml: os_info = { workspace = true }
+    + rand = { workspace = true }
+    + regex = { workspace = true }
+    + regex-lite = { workspace = true }
+    +-reqwest = { workspace = true, features = ["json", "stream"] }
+    ++reqwest = { workspace = true, features = ["json", "stream", "native-tls-vendored"] }
+    + schemars = { workspace = true }
+    + serde = { workspace = true, features = ["derive"] }
+    + serde_json = { workspace = true }
+    +
+      ## codex-rs/core/src/config/mod.rs ##
+     @@
+      use crate::auth::AuthCredentialsStoreMode;
+    @@ codex-rs/core/src/config/mod.rs
+      use crate::config::edit::ConfigEditsBuilder;
+     +use crate::config::types::AgentReasoningTranslationConfig;
+     +use crate::config::types::DEFAULT_AGENT_REASONING_TRANSLATION_TIMEOUT_MS;
+    ++use crate::config::types::DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS;
+      use crate::config::types::DEFAULT_OTEL_ENVIRONMENT;
+      use crate::config::types::History;
+      use crate::config::types::McpServerConfig;
+    @@ codex-rs/core/src/config/mod.rs: impl Config {
+     +                .or_else(|| global.and_then(|settings| settings.timeout_ms))
+     +                .unwrap_or(DEFAULT_AGENT_REASONING_TRANSLATION_TIMEOUT_MS);
+     +
+    ++            let ui_max_wait_ms = profile
+    ++                .and_then(|settings| settings.ui_max_wait_ms)
+    ++                .or_else(|| global.and_then(|settings| settings.ui_max_wait_ms))
+    ++                .unwrap_or(DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS);
+    ++
+     +            match command {
+     +                Some(command) if !command.is_empty() => Some(AgentReasoningTranslationConfig {
+     +                    command,
+     +                    timeout: std::time::Duration::from_millis(timeout_ms),
+    ++                    ui_max_wait: std::time::Duration::from_millis(ui_max_wait_ms),
+     +                }),
+     +                _ => None,
+     +            }
+    @@ codex-rs/core/src/config/mod.rs: persistence = "none"
+     +[translation.agent_reasoning]
+     +command = ["python3", "/tmp/translate.py"]
+     +timeout_ms = 1234
+    ++ui_max_wait_ms = 5678
+     +"#;
+     +        let cfg: ConfigToml = toml::from_str(toml).expect("TOML deserialization should succeed");
+     +
+    @@ codex-rs/core/src/config/mod.rs: persistence = "none"
+     +            Some(AgentReasoningTranslationConfig {
+     +                command: vec!["python3".to_string(), "/tmp/translate.py".to_string()],
+     +                timeout: Duration::from_millis(1234),
+    ++                ui_max_wait: Duration::from_millis(5678),
+     +            })
+     +        );
+     +        Ok(())
+    @@ codex-rs/core/src/config/types.rs: pub enum HistoryPersistence {
+     +    ///
+     +    /// 未设置时使用默认值（见 [`DEFAULT_AGENT_REASONING_TRANSLATION_TIMEOUT_MS`]）。
+     +    pub timeout_ms: Option<u64>,
+    ++
+    ++    /// UI 对齐等待上限（毫秒）。
+    ++    ///
+    ++    /// 说明：
+    ++    /// - 该值仅影响 TUI/TUI2 的“译文紧跟原文”对齐策略（barrier）等待多久；
+    ++    /// - 不影响外部翻译器进程本身的执行超时（见 [`Self::timeout_ms`]）；
+    ++    /// - 未设置时使用默认值（见 [`DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS`]）。
+    ++    pub ui_max_wait_ms: Option<u64>,
+     +}
+     +
+     +/// 翻译器默认超时（毫秒）。用于避免外部命令卡死拖慢 UI/输出。
+     +pub const DEFAULT_AGENT_REASONING_TRANSLATION_TIMEOUT_MS: u64 = 2_000;
+     +
+    ++/// UI 对齐等待上限默认值（毫秒）。用于避免对齐策略长时间缓冲造成“看起来卡住”。
+    ++pub const DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS: u64 = 5_000;
+    ++
+     +/// 运行时使用的推理翻译配置（已完成默认值与单位转换）。
+     +#[derive(Debug, Clone, PartialEq, Eq)]
+     +pub struct AgentReasoningTranslationConfig {
+     +    pub command: Vec<String>,
+     +    pub timeout: Duration,
+    ++    pub ui_max_wait: Duration,
+     +}
+     +
+      // ===== Analytics configuration =====
+    @@ codex-rs/core/src/lib.rs: pub mod landlock;
+      pub use mcp_connection_manager::MCP_SANDBOX_STATE_METHOD;
+      pub use mcp_connection_manager::SandboxState;
+     
+    + ## codex-rs/core/src/tools/handlers/shell.rs ##
+    +@@ codex-rs/core/src/tools/handlers/shell.rs: mod tests {
+    +         };
+    +         assert_safe(&zsh_shell, "ls -la");
+    + 
+    +-        if let Some(path) = try_find_powershell_executable_blocking() {
+    +-            let powershell = Shell {
+    +-                shell_type: ShellType::PowerShell,
+    +-                shell_path: path.to_path_buf(),
+    +-                shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
+    +-            };
+    +-            assert_safe(&powershell, "ls -Name");
+    +-        }
+    ++        // PowerShell 的命令安全检查是 Windows 特有的（依赖 PowerShell AST 解析与 Windows 侧白名单）。
+    ++        // 在非 Windows 平台（例如 WSL）中，`powershell.exe` / `pwsh.exe` 可能在 PATH 中存在，
+    ++        // 但对我们的解析/拼参逻辑并不一定稳定一致，因此这里只在 Windows 上做断言。
+    ++        if cfg!(windows) {
+    ++            if let Some(path) = try_find_powershell_executable_blocking() {
+    ++                let powershell = Shell {
+    ++                    shell_type: ShellType::PowerShell,
+    ++                    shell_path: path.to_path_buf(),
+    ++                    shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
+    ++                };
+    ++                assert_safe(&powershell, "ls -Name");
+    ++            }
+    + 
+    +-        if let Some(path) = try_find_pwsh_executable_blocking() {
+    +-            let pwsh = Shell {
+    +-                shell_type: ShellType::PowerShell,
+    +-                shell_path: path.to_path_buf(),
+    +-                shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
+    +-            };
+    +-            assert_safe(&pwsh, "ls -Name");
+    ++            if let Some(path) = try_find_pwsh_executable_blocking() {
+    ++                let pwsh = Shell {
+    ++                    shell_type: ShellType::PowerShell,
+    ++                    shell_path: path.to_path_buf(),
+    ++                    shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
+    ++                };
+    ++                assert_safe(&pwsh, "ls -Name");
+    ++            }
+    +         }
+    +     }
+    + 
+    +     fn assert_safe(shell: &Shell, command: &str) {
+    +-        assert!(is_known_safe_command(
+    +-            &shell.derive_exec_args(command, /* use_login_shell */ true)
+    +-        ));
+    +-        assert!(is_known_safe_command(
+    +-            &shell.derive_exec_args(command, /* use_login_shell */ false)
+    +-        ));
+    ++        let login_args = shell.derive_exec_args(command, /* use_login_shell */ true);
+    ++        assert!(
+    ++            is_known_safe_command(&login_args),
+    ++            "expected {login_args:?} to be considered safe"
+    ++        );
+    ++
+    ++        let non_login_args = shell.derive_exec_args(command, /* use_login_shell */ false);
+    ++        assert!(
+    ++            is_known_safe_command(&non_login_args),
+    ++            "expected {non_login_args:?} to be considered safe"
+    ++        );
+    +     }
+    + 
+    +     #[tokio::test]
+    +
+      ## codex-rs/core/src/translation/external_command.rs (new) ##
+     @@
+     +use std::process::Stdio;
+    @@ codex-rs/core/src/translation/mod.rs (new)
+     +                script.to_string_lossy().to_string(),
+     +            ],
+     +            timeout: Duration::from_millis(2_000),
+    ++            ui_max_wait: Duration::from_millis(5_000),
+     +        };
+     +
+     +        let translated = translate_text(&config, TranslationKind::AgentReasoningTitle, "Thinking")
+    @@ codex-rs/core/src/translation/mod.rs (new)
+     +                script.to_string_lossy().to_string(),
+     +            ],
+     +            timeout: Duration::from_millis(2_000),
+    ++            ui_max_wait: Duration::from_millis(5_000),
+     +        };
+     +
+     +        let err = translate_text(&config, TranslationKind::AgentReasoningTitle, "Thinking")
+    @@ codex-rs/core/src/translation/mod.rs (new)
+     +                script.to_string_lossy().to_string(),
+     +            ],
+     +            timeout: Duration::from_millis(50),
+    ++            ui_max_wait: Duration::from_millis(5_000),
+     +        };
+     +
+     +        let err = translate_text(&config, TranslationKind::AgentReasoningTitle, "Thinking")
+    @@ codex-rs/core/src/translation/mod.rs (new)
+     +    }
+     +}
+     
+    + ## codex-rs/exec/src/event_processor_with_human_output.rs ##
+    +@@
+    + use codex_common::elapsed::format_duration;
+    + use codex_common::elapsed::format_elapsed;
+    + use codex_core::config::Config;
+    ++use codex_core::config::types::AgentReasoningTranslationConfig;
+    + use codex_core::protocol::AgentMessageEvent;
+    + use codex_core::protocol::AgentReasoningRawContentEvent;
+    + use codex_core::protocol::AgentStatus;
+    +@@ codex-rs/exec/src/event_processor_with_human_output.rs: use owo_colors::Style;
+    + use shlex::try_join;
+    + use std::collections::HashMap;
+    + use std::path::PathBuf;
+    ++use std::sync::mpsc;
+    ++use std::sync::mpsc::TryRecvError;
+    ++use std::thread;
+    ++use std::time::Duration;
+    + use std::time::Instant;
+    + 
+    + use crate::event_processor::CodexStatus;
+    +@@ codex-rs/exec/src/event_processor_with_human_output.rs: pub(crate) struct EventProcessorWithHumanOutput {
+    +     /// Whether to include `AgentReasoning` events in the output.
+    +     show_agent_reasoning: bool,
+    +     show_raw_agent_reasoning: bool,
+    ++    agent_reasoning_translation: Option<AgentReasoningTranslationConfig>,
+    ++    translation_tx: mpsc::Sender<ReasoningTranslationResult>,
+    ++    translation_rx: mpsc::Receiver<ReasoningTranslationResult>,
+    ++    in_flight_reasoning_translations: usize,
+    +     last_message_path: Option<PathBuf>,
+    +     last_total_token_usage: Option<codex_core::protocol::TokenUsageInfo>,
+    +     final_message: Option<String>,
+    +@@ codex-rs/exec/src/event_processor_with_human_output.rs: impl EventProcessorWithHumanOutput {
+    +         last_message_path: Option<PathBuf>,
+    +     ) -> Self {
+    +         let call_id_to_patch = HashMap::new();
+    ++        let (translation_tx, translation_rx) = mpsc::channel();
+    ++        let agent_reasoning_translation = config.agent_reasoning_translation.clone();
+    + 
+    +         if with_ansi {
+    +             Self {
+    +@@ codex-rs/exec/src/event_processor_with_human_output.rs: impl EventProcessorWithHumanOutput {
+    +                 yellow: Style::new().yellow(),
+    +                 show_agent_reasoning: !config.hide_agent_reasoning,
+    +                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+    ++                agent_reasoning_translation,
+    ++                translation_tx,
+    ++                translation_rx,
+    ++                in_flight_reasoning_translations: 0,
+    +                 last_message_path,
+    +                 last_total_token_usage: None,
+    +                 final_message: None,
+    +@@ codex-rs/exec/src/event_processor_with_human_output.rs: impl EventProcessorWithHumanOutput {
+    +                 yellow: Style::new(),
+    +                 show_agent_reasoning: !config.hide_agent_reasoning,
+    +                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+    ++                agent_reasoning_translation,
+    ++                translation_tx,
+    ++                translation_rx,
+    ++                in_flight_reasoning_translations: 0,
+    +                 last_message_path,
+    +                 last_total_token_usage: None,
+    +                 final_message: None,
+    +             }
+    +         }
+    +     }
+    ++
+    ++    fn drain_reasoning_translation_results(&mut self) {
+    ++        loop {
+    ++            match self.translation_rx.try_recv() {
+    ++                Ok(msg) => {
+    ++                    self.in_flight_reasoning_translations =
+    ++                        self.in_flight_reasoning_translations.saturating_sub(1);
+    ++                    match msg.result {
+    ++                        Ok(translated) => {
+    ++                            eprintln!("{}", "译文".style(self.italic).style(self.magenta));
+    ++                            for line in translated.lines() {
+    ++                                eprintln!("{}", line.style(self.dimmed));
+    ++                            }
+    ++                        }
+    ++                        Err(err) => {
+    ++                            eprintln!(
+    ++                                "{} {}",
+    ++                                "译文生成失败:".style(self.red).style(self.bold),
+    ++                                err.style(self.dimmed)
+    ++                            );
+    ++                        }
+    ++                    }
+    ++                }
+    ++                Err(TryRecvError::Empty) => break,
+    ++                Err(TryRecvError::Disconnected) => break,
+    ++            }
+    ++        }
+    ++    }
+    ++
+    ++    fn spawn_reasoning_translation(&mut self, text: String) {
+    ++        let Some(config) = self.agent_reasoning_translation.clone() else {
+    ++            return;
+    ++        };
+    ++        if text.trim().is_empty() {
+    ++            return;
+    ++        }
+    ++
+    ++        self.in_flight_reasoning_translations += 1;
+    ++        let tx = self.translation_tx.clone();
+    ++        thread::spawn(move || {
+    ++            let result = match tokio::runtime::Builder::new_current_thread()
+    ++                .enable_all()
+    ++                .build()
+    ++            {
+    ++                Ok(rt) => rt
+    ++                    .block_on(codex_core::translation::translate_text(
+    ++                        &config,
+    ++                        codex_core::translation::TranslationKind::AgentReasoningBody,
+    ++                        &text,
+    ++                    ))
+    ++                    .map_err(|e| e.to_string()),
+    ++                Err(err) => Err(err.to_string()),
+    ++            };
+    ++
+    ++            let _ = tx.send(ReasoningTranslationResult { result });
+    ++        });
+    ++    }
+    + }
+    + 
+    + struct PatchApplyBegin {
+    +@@ codex-rs/exec/src/event_processor_with_human_output.rs: struct PatchApplyBegin {
+    +     auto_approved: bool,
+    + }
+    + 
+    ++struct ReasoningTranslationResult {
+    ++    result: Result<String, String>,
+    ++}
+    ++
+    + /// Timestamped helper. The timestamp is styled with self.dimmed.
+    + macro_rules! ts_msg {
+    +     ($self:ident, $($arg:tt)*) => {{
+    +@@ codex-rs/exec/src/event_processor_with_human_output.rs: impl EventProcessor for EventProcessorWithHumanOutput {
+    + 
+    +     fn process_event(&mut self, event: Event) -> CodexStatus {
+    +         let Event { id: _, msg } = event;
+    ++        // best-effort：在处理新事件前先输出已完成的译文，避免后台线程直接写 stdout/stderr
+    ++        self.drain_reasoning_translation_results();
+    +         match msg {
+    +             EventMsg::Error(ErrorEvent { message, .. }) => {
+    +                 let prefix = "ERROR:".style(self.red);
+    +@@ codex-rs/exec/src/event_processor_with_human_output.rs: impl EventProcessor for EventProcessorWithHumanOutput {
+    +                         self,
+    +                         "{}\n{}",
+    +                         "thinking".style(self.italic).style(self.magenta),
+    +-                        text,
+    ++                        &text,
+    +                     );
+    ++                    self.spawn_reasoning_translation(text);
+    +                 }
+    +             }
+    +             EventMsg::AgentMessage(AgentMessageEvent { message }) => {
+    +@@ codex-rs/exec/src/event_processor_with_human_output.rs: impl EventProcessor for EventProcessorWithHumanOutput {
+    +             }
+    +             EventMsg::AgentReasoning(agent_reasoning_event) => {
+    +                 if self.show_agent_reasoning {
+    ++                    let text = agent_reasoning_event.text;
+    +                     ts_msg!(
+    +                         self,
+    +                         "{}\n{}",
+    +                         "thinking".style(self.italic).style(self.magenta),
+    +-                        agent_reasoning_event.text,
+    ++                        &text,
+    +                     );
+    ++                    self.spawn_reasoning_translation(text);
+    +                 }
+    +             }
+    +             EventMsg::SessionConfigured(session_configured_event) => {
+    +@@ codex-rs/exec/src/event_processor_with_human_output.rs: impl EventProcessor for EventProcessorWithHumanOutput {
+    +     }
+    + 
+    +     fn print_final_output(&mut self) {
+    ++        // 尽力输出已完成的译文，但不要阻塞退出流程。
+    ++        // 如果译文线程仍在运行，这里最多等一个很短的时间窗口用于“捡漏”。
+    ++        let start = Instant::now();
+    ++        while self.in_flight_reasoning_translations > 0
+    ++            && start.elapsed() < Duration::from_millis(50)
+    ++        {
+    ++            self.drain_reasoning_translation_results();
+    ++            thread::sleep(Duration::from_millis(5));
+    ++        }
+    ++        self.drain_reasoning_translation_results();
+    ++
+    +         if let Some(usage_info) = &self.last_total_token_usage {
+    +             eprintln!(
+    +                 "{}\n{}",
+    +
+    + ## codex-rs/tui/src/app.rs ##
+    +@@ codex-rs/tui/src/app.rs: impl App {
+    +         tui: &mut tui::Tui,
+    +         event: TuiEvent,
+    +     ) -> Result<AppRunControl> {
+    ++        if matches!(event, TuiEvent::Draw) {
+    ++            self.chat_widget
+    ++                .maybe_flush_agent_reasoning_body_translation_barrier_timeout();
+    ++        }
+    +         if self.overlay.is_some() {
+    +             let _ = self.handle_backtrack_overlay_event(tui, event).await?;
+    +         } else {
+    +@@ codex-rs/tui/src/app.rs: impl App {
+    +                     }
+    +                 }
+    +             }
+    ++            AppEvent::AgentReasoningBodyTranslated {
+    ++                request_id,
+    ++                thread_id,
+    ++                title,
+    ++                translated,
+    ++                error,
+    ++            } => {
+    ++                self.chat_widget.on_agent_reasoning_body_translated(
+    ++                    request_id, thread_id, title, translated, error,
+    ++                );
+    ++            }
+    +             AppEvent::StartCommitAnimation => {
+    +                 if self
+    +                     .commit_anim_running
+    +
+    + ## codex-rs/tui/src/app_event.rs ##
+    +@@ codex-rs/tui/src/app_event.rs: pub(crate) enum AppEvent {
+    + 
+    +     InsertHistoryCell(Box<dyn HistoryCell>),
+    + 
+    ++    /// 推理（AgentReasoning）正文翻译结果回传（外部命令插件）。
+    ++    AgentReasoningBodyTranslated {
+    ++        request_id: u64,
+    ++        thread_id: ThreadId,
+    ++        title: Option<String>,
+    ++        translated: Option<String>,
+    ++        error: Option<String>,
+    ++    },
+    ++
+    +     StartCommitAnimation,
+    +     StopCommitAnimation,
+    +     CommitTick,
+    +
+    + ## codex-rs/tui/src/bottom_pane/footer.rs ##
+    +@@
+    + //! Some footer content is time-based rather than event-based, such as the "press again to quit"
+    + //! hint. The owning widgets schedule redraws so time-based hints can expire even if the UI is
+    + //! otherwise idle.
+    +-#[cfg(target_os = "linux")]
+    ++#[cfg(all(target_os = "linux", not(test)))]
+    + use crate::clipboard_paste::is_probably_wsl;
+    + use crate::key_hint;
+    + use crate::key_hint::KeyBinding;
+    +@@ codex-rs/tui/src/bottom_pane/footer.rs: fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
+    +             vec![line]
+    +         }
+    +         FooterMode::ShortcutOverlay => {
+    +-            #[cfg(target_os = "linux")]
+    ++            // 快照测试需要跨环境稳定；测试中禁用 WSL 检测，避免渲染出的快捷键提示依赖 /proc/version。
+    ++            #[cfg(all(target_os = "linux", not(test)))]
+    +             let is_wsl = is_probably_wsl();
+    +-            #[cfg(not(target_os = "linux"))]
+    ++            #[cfg(any(not(target_os = "linux"), test))]
+    +             let is_wsl = false;
+    + 
+    +             let state = ShortcutsState {
+    +
+    + ## codex-rs/tui/src/chatwidget.rs ##
+    +@@ codex-rs/tui/src/chatwidget.rs: use codex_app_server_protocol::AuthMode;
+    + use codex_backend_client::Client as BackendClient;
+    + use codex_core::config::Config;
+    + use codex_core::config::ConstraintResult;
+    ++use codex_core::config::types::AgentReasoningTranslationConfig;
+    ++use codex_core::config::types::DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS;
+    + use codex_core::config::types::Notifications;
+    + use codex_core::features::FEATURES;
+    + use codex_core::features::Feature;
+    +@@ codex-rs/tui/src/chatwidget.rs: pub(crate) enum ExternalEditorState {
+    +     Active,
+    + }
+    + 
+    ++/// 推理（AgentReasoning）正文翻译的 UI 对齐等待时间上限（默认 5 秒）。
+    ++///
+    ++/// 说明：
+    ++/// - 方案 A：为了保证“译文紧跟在原文下面”，在译文生成完成（或超时）前，会短暂缓冲后续的历史输出，
+    ++///   避免其它块插入导致错位。
+    ++/// - 该等待仅影响“历史输出的落盘顺序”，不会阻塞 agent 本身继续运行。
+    ++/// - 默认值来自配置：`translation.agent_reasoning.ui_max_wait_ms`（未配置则回退到内置默认值）。
+    ++/// - 环境变量可覆盖：见 [`AGENT_REASONING_TRANSLATION_MAX_WAIT_ENV`]。
+    ++///
+    ++/// 覆盖推理译文对齐等待上限的环境变量（单位：毫秒）。
+    ++///
+    ++/// 示例：`CODEX_TUI_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS=5000`
+    ++const AGENT_REASONING_TRANSLATION_MAX_WAIT_ENV: &str =
+    ++    "CODEX_TUI_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS";
+    ++
+    ++#[derive(Debug)]
+    ++struct AgentReasoningBodyTranslationBarrier {
+    ++    request_id: u64,
+    ++    thread_id: ThreadId,
+    ++    title: Option<String>,
+    ++    max_wait: Duration,
+    ++    deadline: Instant,
+    ++}
+    ++
+    + /// Maintains the per-session UI state and interaction state machines for the chat screen.
+    + ///
+    + /// `ChatWidget` owns the state derived from the protocol event stream (history cells, streaming
+    +@@ codex-rs/tui/src/chatwidget.rs: pub(crate) struct ChatWidget {
+    +     reasoning_buffer: String,
+    +     // Accumulates full reasoning content for transcript-only recording
+    +     full_reasoning_buffer: String,
+    ++    // ===== 推理翻译（外部命令插件） =====
+    ++    agent_reasoning_title_translation_cache: HashMap<String, String>,
+    ++    current_reasoning_title_raw: Option<String>,
+    ++    agent_reasoning_body_translation_barrier: Option<AgentReasoningBodyTranslationBarrier>,
+    ++    deferred_history_cells: VecDeque<Box<dyn HistoryCell>>,
+    ++    agent_reasoning_body_translation_seq: u64,
+    +     // Current status header shown in the status indicator.
+    +     current_status_header: String,
+    +     // Previous status header to restore after a transient stream retry.
+    +@@ codex-rs/tui/src/chatwidget.rs: impl ChatWidget {
+    +         }
+    + 
+    +         if let Some(header) = extract_first_bold(&self.reasoning_buffer) {
+    +-            // Update the shimmer header to the extracted reasoning chunk header.
+    +-            self.set_status_header(header);
+    ++            self.current_reasoning_title_raw = Some(header.clone());
+    ++
+    ++            // 先立即显示原文标题；如已从“正文翻译结果”中提取并缓存译文，则显示双语标题。
+    ++            if let Some(translated) = self.agent_reasoning_title_translation_cache.get(&header) {
+    ++                self.set_status_header(codex_core::translation::format_bilingual_title(
+    ++                    &header, translated,
+    ++                ));
+    ++            } else {
+    ++                self.set_status_header(header);
+    ++            }
+    +         } else {
+    +             // Fallback while we don't yet have a bold header: leave existing header as-is.
+    +         }
+    +@@ codex-rs/tui/src/chatwidget.rs: impl ChatWidget {
+    +     fn on_agent_reasoning_final(&mut self) {
+    +         // At the end of a reasoning block, record transcript-only content.
+    +         self.full_reasoning_buffer.push_str(&self.reasoning_buffer);
+    ++
+    +         if !self.full_reasoning_buffer.is_empty() {
+    +-            let cell =
+    +-                history_cell::new_reasoning_summary_block(self.full_reasoning_buffer.clone());
+    ++            let full_reasoning = self.full_reasoning_buffer.clone();
+    ++            let cell = history_cell::new_reasoning_summary_block(full_reasoning.clone());
+    +             self.add_boxed_history(cell);
+    ++
+    ++            self.maybe_translate_reasoning_body(full_reasoning);
+    +         }
+    +         self.reasoning_buffer.clear();
+    +         self.full_reasoning_buffer.clear();
+    +@@ codex-rs/tui/src/chatwidget.rs: impl ChatWidget {
+    +         self.reasoning_buffer.clear();
+    +     }
+    + 
+    ++    fn maybe_translate_reasoning_body(&mut self, full_reasoning: String) {
+    ++        let Some(config) = self.config.agent_reasoning_translation.clone() else {
+    ++            return;
+    ++        };
+    ++        let Some(thread_id) = self.thread_id else {
+    ++            return;
+    ++        };
+    ++
+    ++        let title = extract_first_bold(&full_reasoning);
+    ++        let Some(body) = extract_reasoning_body_for_translation(&full_reasoning) else {
+    ++            return;
+    ++        };
+    ++        if body.trim().is_empty() {
+    ++            return;
+    ++        }
+    ++
+    ++        // 方案 A：为保证译文紧跟原文，在译文生成完成（或超时）前，缓冲后续历史输出。
+    ++        let Some(request_id) =
+    ++            self.begin_agent_reasoning_body_translation_barrier(thread_id, title.clone())
+    ++        else {
+    ++            return;
+    ++        };
+    ++
+    ++        // 仅调用一次翻译：把 “**标题** + 正文” 一起交给外部翻译器。
+    ++        // 这样可以在同一次返回中拿到“主题译文 + 正文译文”，避免标题/正文分别调用带来的成本与延迟。
+    ++        let full_reasoning_for_translation = full_reasoning;
+    ++        let tx = self.app_event_tx.clone();
+    ++        tokio::spawn(async move {
+    ++            let result = codex_core::translation::translate_text(
+    ++                &config,
+    ++                codex_core::translation::TranslationKind::AgentReasoningBody,
+    ++                &full_reasoning_for_translation,
+    ++            )
+    ++            .await;
+    ++
+    ++            match result {
+    ++                Ok(translated) => tx.send(AppEvent::AgentReasoningBodyTranslated {
+    ++                    request_id,
+    ++                    thread_id,
+    ++                    title,
+    ++                    translated: Some(translated),
+    ++                    error: None,
+    ++                }),
+    ++                Err(err) => tx.send(AppEvent::AgentReasoningBodyTranslated {
+    ++                    request_id,
+    ++                    thread_id,
+    ++                    title,
+    ++                    translated: None,
+    ++                    error: Some(err.to_string()),
+    ++                }),
+    ++            };
+    ++        });
+    ++    }
+    ++
+    ++    pub(crate) fn on_agent_reasoning_body_translated(
+    ++        &mut self,
+    ++        request_id: u64,
+    ++        thread_id: ThreadId,
+    ++        title: Option<String>,
+    ++        translated: Option<String>,
+    ++        error: Option<String>,
+    ++    ) {
+    ++        let Some(barrier) = self.agent_reasoning_body_translation_barrier.as_ref() else {
+    ++            // 已超时释放，或会话已切换；为保证“译文紧跟原文”，这里不再追加晚到的译文。
+    ++            return;
+    ++        };
+    ++        if barrier.request_id != request_id {
+    ++            return;
+    ++        }
+    ++        if barrier.thread_id != thread_id {
+    ++            return;
+    ++        }
+    ++        if self.thread_id.as_ref() != Some(&thread_id) {
+    ++            return;
+    ++        }
+    ++
+    ++        // 先结束 barrier，确保译文与后续缓冲内容按顺序落盘。
+    ++        self.agent_reasoning_body_translation_barrier = None;
+    ++
+    ++        if let Some(translated) = translated {
+    ++            // 译文返回的是完整块（包含 `**标题**`），这里再拆分出：
+    ++            // - 主题译文：用于译文块标题 & 状态栏缓存
+    ++            // - 正文译文：用于译文块内容（避免重复显示标题）
+    ++            let translated_title = extract_first_bold(&translated);
+    ++            let translated_body = extract_reasoning_body_for_translation(&translated)
+    ++                .unwrap_or_else(|| translated.clone())
+    ++                .trim()
+    ++                .to_string();
+    ++
+    ++            // 尽力缓存标题译文（用于后续实时 status 显示），但不强行兜底二次翻译。
+    ++            if let (Some(original), Some(translated_title)) =
+    ++                (title.as_deref(), translated_title.as_deref())
+    ++            {
+    ++                self.agent_reasoning_title_translation_cache
+    ++                    .insert(original.to_string(), translated_title.to_string());
+    ++
+    ++                // 仅当当前 UI 仍在展示同一个推理标题时，才更新状态行，避免“串台”。
+    ++                if self.thread_id.as_ref() == Some(&thread_id)
+    ++                    && self.current_reasoning_title_raw.as_deref() == Some(original)
+    ++                {
+    ++                    self.set_status_header(codex_core::translation::format_bilingual_title(
+    ++                        original,
+    ++                        translated_title,
+    ++                    ));
+    ++                }
+    ++            }
+    ++
+    ++            self.emit_history_cell(history_cell::new_agent_reasoning_translation_block(
+    ++                None,
+    ++                if translated_body.is_empty() {
+    ++                    translated
+    ++                } else {
+    ++                    translated_body
+    ++                },
+    ++            ));
+    ++        } else {
+    ++            let reason = error.unwrap_or_else(|| "unknown error".to_string());
+    ++            self.emit_history_cell(history_cell::new_agent_reasoning_translation_error_block(
+    ++                title, reason,
+    ++            ));
+    ++        }
+    ++
+    ++        self.flush_deferred_history_cells();
+    ++        self.request_redraw();
+    ++    }
+    ++
+    +     // Raw reasoning uses the same flow as summarized reasoning
+    + 
+    +     fn on_task_started(&mut self) {
+    +@@ codex-rs/tui/src/chatwidget.rs: impl ChatWidget {
+    +         self.set_status_header(String::from("Working"));
+    +         self.full_reasoning_buffer.clear();
+    +         self.reasoning_buffer.clear();
+    ++        self.current_reasoning_title_raw = None;
+    +         self.request_redraw();
+    +     }
+    + 
+    +@@ codex-rs/tui/src/chatwidget.rs: impl ChatWidget {
+    +             interrupts: InterruptManager::new(),
+    +             reasoning_buffer: String::new(),
+    +             full_reasoning_buffer: String::new(),
+    ++            agent_reasoning_title_translation_cache: HashMap::new(),
+    ++            current_reasoning_title_raw: None,
+    ++            agent_reasoning_body_translation_barrier: None,
+    ++            deferred_history_cells: VecDeque::new(),
+    ++            agent_reasoning_body_translation_seq: 0,
+    +             current_status_header: String::from("Working"),
+    +             retry_status_header: None,
+    +             thread_id: None,
+    +@@ codex-rs/tui/src/chatwidget.rs: impl ChatWidget {
+    +             interrupts: InterruptManager::new(),
+    +             reasoning_buffer: String::new(),
+    +             full_reasoning_buffer: String::new(),
+    ++            agent_reasoning_title_translation_cache: HashMap::new(),
+    ++            current_reasoning_title_raw: None,
+    ++            agent_reasoning_body_translation_barrier: None,
+    ++            deferred_history_cells: VecDeque::new(),
+    ++            agent_reasoning_body_translation_seq: 0,
+    +             current_status_header: String::from("Working"),
+    +             retry_status_header: None,
+    +             thread_id: None,
+    +@@ codex-rs/tui/src/chatwidget.rs: impl ChatWidget {
+    +         }
+    +     }
+    + 
+    ++    fn agent_reasoning_translation_max_wait(
+    ++        config: Option<&AgentReasoningTranslationConfig>,
+    ++    ) -> Duration {
+    ++        let config_max_wait = config.map(|cfg| cfg.ui_max_wait).unwrap_or_else(|| {
+    ++            Duration::from_millis(DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS)
+    ++        });
+    ++
+    ++        match std::env::var(AGENT_REASONING_TRANSLATION_MAX_WAIT_ENV) {
+    ++            Ok(raw) => match raw.trim().parse::<u64>() {
+    ++                Ok(ms) => Duration::from_millis(ms),
+    ++                Err(err) => {
+    ++                    tracing::warn!(
+    ++                        "无法解析环境变量 {AGENT_REASONING_TRANSLATION_MAX_WAIT_ENV}={raw:?}：{err}；将使用配置值 {}ms（未配置则默认 {}ms）",
+    ++                        config_max_wait.as_millis(),
+    ++                        DEFAULT_AGENT_REASONING_TRANSLATION_UI_MAX_WAIT_MS
+    ++                    );
+    ++                    config_max_wait
+    ++                }
+    ++            },
+    ++            Err(_) => config_max_wait,
+    ++        }
+    ++    }
+    ++
+    ++    fn begin_agent_reasoning_body_translation_barrier(
+    ++        &mut self,
+    ++        thread_id: ThreadId,
+    ++        title: Option<String>,
+    ++    ) -> Option<u64> {
+    ++        if self.agent_reasoning_body_translation_barrier.is_some() {
+    ++            // 同一时刻只允许一个 barrier；避免多段推理并发时造成输出死锁。
+    ++            return None;
+    ++        }
+    ++        let request_id = self.agent_reasoning_body_translation_seq;
+    ++        self.agent_reasoning_body_translation_seq =
+    ++            self.agent_reasoning_body_translation_seq.saturating_add(1);
+    ++        let max_wait = Self::agent_reasoning_translation_max_wait(
+    ++            self.config.agent_reasoning_translation.as_ref(),
+    ++        );
+    ++        let deadline = Instant::now()
+    ++            .checked_add(max_wait)
+    ++            .unwrap_or_else(Instant::now);
+    ++        self.agent_reasoning_body_translation_barrier =
+    ++            Some(AgentReasoningBodyTranslationBarrier {
+    ++                request_id,
+    ++                thread_id,
+    ++                title,
+    ++                max_wait,
+    ++                deadline,
+    ++            });
+    ++        // 触发一个未来的 Draw tick，用于在没有其它事件到来时也能按时超时释放。
+    ++        self.frame_requester.schedule_frame_in(max_wait);
+    ++        Some(request_id)
+    ++    }
+    ++
+    ++    pub(crate) fn maybe_flush_agent_reasoning_body_translation_barrier_timeout(&mut self) {
+    ++        let Some(barrier) = self.agent_reasoning_body_translation_barrier.as_ref() else {
+    ++            return;
+    ++        };
+    ++        if Instant::now() < barrier.deadline {
+    ++            return;
+    ++        }
+    ++
+    ++        let title = barrier.title.clone();
+    ++        let max_wait = barrier.max_wait;
+    ++        let max_wait_ms = max_wait.as_millis();
+    ++
+    ++        // 先结束 barrier，再输出失败块与缓冲内容，确保它们按顺序落盘。
+    ++        self.agent_reasoning_body_translation_barrier = None;
+    ++        self.emit_history_cell(history_cell::new_agent_reasoning_translation_error_block(
+    ++            title,
+    ++            format!("等待超时（{max_wait_ms}ms），已跳过译文输出"),
+    ++        ));
+    ++        self.flush_deferred_history_cells();
+    ++        self.request_redraw();
+    ++    }
+    ++
+    ++    fn emit_history_cell(&mut self, cell: Box<dyn HistoryCell>) {
+    ++        if self.agent_reasoning_body_translation_barrier.is_some() {
+    ++            self.deferred_history_cells.push_back(cell);
+    ++        } else {
+    ++            self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
+    ++        }
+    ++    }
+    ++
+    ++    fn flush_deferred_history_cells(&mut self) {
+    ++        while let Some(cell) = self.deferred_history_cells.pop_front() {
+    ++            let maybe_reasoning_for_translation = cell
+    ++                .as_any()
+    ++                .downcast_ref::<history_cell::ReasoningSummaryCell>()
+    ++                .and_then(history_cell::ReasoningSummaryCell::full_markdown_for_translation);
+    ++
+    ++            self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
+    ++
+    ++            if let Some(full_reasoning) = maybe_reasoning_for_translation {
+    ++                // 关键：barrier 期间可能积压了新的推理块（ReasoningSummaryCell）。
+    ++                // 若直接一次性 flush 完所有缓冲内容，会导致这些推理块“没触发翻译”。
+    ++                // 这里在 flush 时遇到推理块就尝试启动下一次翻译，并立即停止继续 flush，
+    ++                // 以保证其译文仍然紧跟在对应原文下面。
+    ++                if self.agent_reasoning_body_translation_barrier.is_none() {
+    ++                    self.maybe_translate_reasoning_body(full_reasoning);
+    ++                    if self.agent_reasoning_body_translation_barrier.is_some() {
+    ++                        break;
+    ++                    }
+    ++                }
+    ++            }
+    ++        }
+    ++    }
+    ++
+    +     fn flush_active_cell(&mut self) {
+    +         if let Some(active) = self.active_cell.take() {
+    +             self.needs_final_message_separator = true;
+    +-            self.app_event_tx.send(AppEvent::InsertHistoryCell(active));
+    ++            self.emit_history_cell(active);
+    +         }
+    +     }
+    + 
+    +@@ codex-rs/tui/src/chatwidget.rs: impl ChatWidget {
+    +             self.flush_active_cell();
+    +             self.needs_final_message_separator = true;
+    +         }
+    +-        self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
+    ++        self.emit_history_cell(cell);
+    +     }
+    + 
+    +     fn queue_user_message(&mut self, user_message: UserMessage) {
+    +@@ codex-rs/tui/src/chatwidget.rs: impl ChatWidget {
+    +         if let Some(stripped) = text.strip_prefix('!') {
+    +             let cmd = stripped.trim();
+    +             if cmd.is_empty() {
+    +-                self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+    +-                    history_cell::new_info_event(
+    +-                        USER_SHELL_COMMAND_HELP_TITLE.to_string(),
+    +-                        Some(USER_SHELL_COMMAND_HELP_HINT.to_string()),
+    +-                    ),
+    ++                self.emit_history_cell(Box::new(history_cell::new_info_event(
+    ++                    USER_SHELL_COMMAND_HELP_TITLE.to_string(),
+    ++                    Some(USER_SHELL_COMMAND_HELP_HINT.to_string()),
+    +                 )));
+    +                 return;
+    +             }
+    +@@ codex-rs/tui/src/chatwidget.rs: impl ChatWidget {
+    +                     let mut rendered: Vec<ratatui::text::Line<'static>> = vec!["".into()];
+    +                     append_markdown(&explanation, None, &mut rendered);
+    +                     let body_cell = AgentMessageCell::new(rendered, false);
+    +-                    self.app_event_tx
+    +-                        .send(AppEvent::InsertHistoryCell(Box::new(body_cell)));
+    ++                    self.emit_history_cell(Box::new(body_cell));
+    +                 }
+    +             }
+    +             // Final message is rendered as part of the AgentMessage.
+    +@@ codex-rs/tui/src/chatwidget.rs: fn extract_first_bold(s: &str) -> Option<String> {
+    +     None
+    + }
+    + 
+    ++/// 从推理 Markdown 中提取“正文”部分（去掉首个 `**标题**`）。
+    ++///
+    ++/// 约定：推理块通常以 `**Thinking**` 之类的粗体标题开头，后续为正文。
+    ++/// 若未找到完整的 `**...**`，或标题后没有正文，则返回 `None`。
+    ++fn extract_reasoning_body_for_translation(full_reasoning_markdown: &str) -> Option<String> {
+    ++    let full_reasoning_markdown = full_reasoning_markdown.trim();
+    ++    let open = full_reasoning_markdown.find("**")?;
+    ++    let after_open = &full_reasoning_markdown[(open + 2)..];
+    ++    let close = after_open.find("**")?;
+    ++
+    ++    let after_close_idx = open + 2 + close + 2;
+    ++    if after_close_idx >= full_reasoning_markdown.len() {
+    ++        return None;
+    ++    }
+    ++    let body = full_reasoning_markdown[after_close_idx..].trim_start();
+    ++    if body.is_empty() {
+    ++        None
+    ++    } else {
+    ++        Some(body.to_string())
+    ++    }
+    ++}
+    ++
+    + async fn fetch_rate_limits(base_url: String, auth: CodexAuth) -> Option<RateLimitSnapshot> {
+    +     match BackendClient::from_auth(base_url, &auth) {
+    +         Ok(client) => match client.get_rate_limits().await {
+    +
+    + ## codex-rs/tui/src/chatwidget/tests.rs ##
+    +@@ codex-rs/tui/src/chatwidget/tests.rs: async fn make_chatwidget_manual(
+    +         interrupts: InterruptManager::new(),
+    +         reasoning_buffer: String::new(),
+    +         full_reasoning_buffer: String::new(),
+    ++        agent_reasoning_title_translation_cache: HashMap::new(),
+    ++        current_reasoning_title_raw: None,
+    ++        agent_reasoning_body_translation_barrier: None,
+    ++        deferred_history_cells: VecDeque::new(),
+    ++        agent_reasoning_body_translation_seq: 0,
+    +         current_status_header: String::from("Working"),
+    +         retry_status_header: None,
+    +         thread_id: None,
+    +@@ codex-rs/tui/src/chatwidget/tests.rs: async fn review_queues_user_messages_snapshot() {
+    +     .unwrap();
+    +     assert_snapshot!(term.backend().vt100().screen().contents());
+    + }
+    ++
+    ++#[test]
+    ++fn extract_first_bold_handles_incomplete_and_trim() {
+    ++    assert_eq!(extract_first_bold("no bold"), None);
+    ++    assert_eq!(extract_first_bold("**Thinking"), None);
+    ++    assert_eq!(extract_first_bold("****"), None);
+    ++    assert_eq!(
+    ++        extract_first_bold("** Thinking ** then"),
+    ++        Some("Thinking".to_string())
+    ++    );
+    ++    assert_eq!(
+    ++        extract_first_bold("prefix **Thinking** suffix"),
+    ++        Some("Thinking".to_string())
+    ++    );
+    ++}
+    ++
+    ++#[tokio::test]
+    ++async fn reasoning_body_translation_barrier_keeps_translation_adjacent() {
+    ++    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    ++
+    ++    let thread_id = ThreadId::new();
+    ++    chat.thread_id = Some(thread_id);
+    ++
+    ++    // 先插入“原文推理摘要”块（对应真实运行时的 on_agent_reasoning_final）。
+    ++    let full_reasoning = "**Thinking**\n\nI will first analyze the request.".to_string();
+    ++    chat.add_boxed_history(history_cell::new_reasoning_summary_block(full_reasoning));
+    ++
+    ++    // 开启 barrier：在译文生成完成前，缓冲后续历史输出。
+    ++    let request_id = chat
+    ++        .begin_agent_reasoning_body_translation_barrier(thread_id, Some("Thinking".to_string()))
+    ++        .expect("expected barrier to start");
+    ++
+    ++    // 这条输出若不缓冲，会插入到译文之前导致错位。
+    ++    chat.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+    ++        ratatui::text::Line::from("AFTER_CELL"),
+    ++    ]));
+    ++
+    ++    // 模拟译文返回（不依赖真实外部翻译器）。
+    ++    chat.on_agent_reasoning_body_translated(
+    ++        request_id,
+    ++        thread_id,
+    ++        Some("Thinking".to_string()),
+    ++        Some("**思考中**\n\n这里是中文翻译。".to_string()),
+    ++        None,
+    ++    );
+    ++
+    ++    let cells = drain_insert_history(&mut rx);
+    ++    let combined: Vec<String> = cells
+    ++        .iter()
+    ++        .map(|lines| lines_to_single_string(lines))
+    ++        .collect();
+    ++
+    ++    assert!(
+    ++        combined
+    ++            .first()
+    ++            .is_some_and(|s| s.contains("I will first analyze")),
+    ++        "missing reasoning block in first cell: {combined:?}"
+    ++    );
+    ++    assert!(
+    ++        combined.get(1).is_some_and(|s| s.contains("└ ")
+    ++            && s.contains("这里是中文翻译")
+    ++            && !s.contains("└ 译文")),
+    ++        "expected translation cell immediately after reasoning: {combined:?}"
+    ++    );
+    ++    assert!(
+    ++        combined.get(2).is_some_and(|s| s.contains("AFTER_CELL")),
+    ++        "expected buffered cell to flush after translation: {combined:?}"
+    ++    );
+    ++}
+    ++
+    ++#[tokio::test]
+    ++async fn reasoning_body_translation_barrier_uses_config_ui_max_wait() {
+    ++    use codex_core::config::types::AgentReasoningTranslationConfig;
+    ++    use std::time::Duration;
+    ++
+    ++    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    ++
+    ++    // 这里不需要真实可执行的 command：该测试仅验证 barrier 的等待时间取值逻辑。
+    ++    chat.config.agent_reasoning_translation = Some(AgentReasoningTranslationConfig {
+    ++        command: Vec::new(),
+    ++        timeout: Duration::from_millis(2_000),
+    ++        ui_max_wait: Duration::from_millis(12_345),
+    ++    });
+    ++
+    ++    let thread_id = ThreadId::new();
+    ++    chat.thread_id = Some(thread_id);
+    ++
+    ++    let expected = std::env::var("CODEX_TUI_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS")
+    ++        .ok()
+    ++        .and_then(|raw| raw.trim().parse::<u64>().ok())
+    ++        .map(Duration::from_millis)
+    ++        .unwrap_or(Duration::from_millis(12_345));
+    ++
+    ++    let _request_id = chat
+    ++        .begin_agent_reasoning_body_translation_barrier(thread_id, Some("Thinking".to_string()))
+    ++        .expect("expected barrier to start");
+    ++
+    ++    let barrier = chat
+    ++        .agent_reasoning_body_translation_barrier
+    ++        .as_ref()
+    ++        .expect("barrier should exist");
+    ++    assert_eq!(barrier.max_wait, expected);
+    ++}
+    ++
+    ++#[tokio::test]
+    ++async fn reasoning_body_translation_barrier_times_out_and_flushes_buffer() {
+    ++    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    ++
+    ++    let thread_id = ThreadId::new();
+    ++    chat.thread_id = Some(thread_id);
+    ++
+    ++    let full_reasoning = "**Thinking**\n\nI will first analyze the request.".to_string();
+    ++    chat.add_boxed_history(history_cell::new_reasoning_summary_block(full_reasoning));
+    ++
+    ++    let _request_id = chat
+    ++        .begin_agent_reasoning_body_translation_barrier(thread_id, Some("Thinking".to_string()))
+    ++        .expect("expected barrier to start");
+    ++
+    ++    chat.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+    ++        ratatui::text::Line::from("AFTER_CELL"),
+    ++    ]));
+    ++
+    ++    // 人为把 deadline 设到过去，触发一次超时释放。
+    ++    if let Some(barrier) = chat.agent_reasoning_body_translation_barrier.as_mut() {
+    ++        barrier.deadline = std::time::Instant::now() - std::time::Duration::from_millis(1);
+    ++    }
+    ++    chat.maybe_flush_agent_reasoning_body_translation_barrier_timeout();
+    ++
+    ++    let cells = drain_insert_history(&mut rx);
+    ++    let combined: Vec<String> = cells
+    ++        .iter()
+    ++        .map(|lines| lines_to_single_string(lines))
+    ++        .collect();
+    ++
+    ++    assert!(
+    ++        combined
+    ++            .get(1)
+    ++            .is_some_and(|s| s.contains("译文生成失败") && s.contains("等待超时")),
+    ++        "expected timeout error cell after reasoning: {combined:?}"
+    ++    );
+    ++    assert!(
+    ++        combined.get(2).is_some_and(|s| s.contains("AFTER_CELL")),
+    ++        "expected buffered cell to flush after timeout: {combined:?}"
+    ++    );
+    ++}
+    ++
+    ++#[tokio::test]
+    ++async fn reasoning_body_translation_ignores_late_results_from_previous_barrier() {
+    ++    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    ++
+    ++    let thread_id = ThreadId::new();
+    ++    chat.thread_id = Some(thread_id);
+    ++
+    ++    chat.add_boxed_history(history_cell::new_reasoning_summary_block(
+    ++        "**Thinking**\n\nFirst reasoning.".to_string(),
+    ++    ));
+    ++
+    ++    let request_id_1 = chat
+    ++        .begin_agent_reasoning_body_translation_barrier(thread_id, Some("Thinking".to_string()))
+    ++        .expect("expected barrier to start");
+    ++
+    ++    // 超时释放 barrier 1（模拟翻译器卡住/很慢，译文晚到）。
+    ++    if let Some(barrier) = chat.agent_reasoning_body_translation_barrier.as_mut() {
+    ++        barrier.deadline = std::time::Instant::now() - std::time::Duration::from_millis(1);
+    ++    }
+    ++    chat.maybe_flush_agent_reasoning_body_translation_barrier_timeout();
+    ++
+    ++    let request_id_2 = chat
+    ++        .begin_agent_reasoning_body_translation_barrier(thread_id, Some("Thinking".to_string()))
+    ++        .expect("expected barrier to start");
+    ++
+    ++    // 旧译文晚到：不应当打断当前 barrier，也不应插入到历史中。
+    ++    chat.on_agent_reasoning_body_translated(
+    ++        request_id_1,
+    ++        thread_id,
+    ++        Some("Thinking".to_string()),
+    ++        Some("**旧**\n\n旧译文".to_string()),
+    ++        None,
+    ++    );
+    ++    assert!(
+    ++        chat.agent_reasoning_body_translation_barrier
+    ++            .as_ref()
+    ++            .is_some_and(|b| b.request_id == request_id_2),
+    ++        "late result should not affect the current barrier"
+    ++    );
+    ++
+    ++    // 当前译文到达：应当正常结束 barrier 并落盘。
+    ++    chat.on_agent_reasoning_body_translated(
+    ++        request_id_2,
+    ++        thread_id,
+    ++        Some("Thinking".to_string()),
+    ++        Some("**新**\n\n新译文".to_string()),
+    ++        None,
+    ++    );
+    ++    assert!(
+    ++        chat.agent_reasoning_body_translation_barrier.is_none(),
+    ++        "expected barrier to clear after matching translation result"
+    ++    );
+    ++
+    ++    let cells = drain_insert_history(&mut rx);
+    ++    let combined = cells
+    ++        .iter()
+    ++        .map(|lines| lines_to_single_string(lines))
+    ++        .collect::<Vec<_>>();
+    ++
+    ++    assert!(
+    ++        combined.iter().all(|s| !s.contains("旧译文")),
+    ++        "did not expect late translation to be inserted: {combined:?}"
+    ++    );
+    ++    assert!(
+    ++        combined.iter().any(|s| s.contains("新译文")),
+    ++        "expected current translation to be inserted: {combined:?}"
+    ++    );
+    ++}
+    ++
+    ++#[tokio::test]
+    ++async fn reasoning_body_translation_barrier_does_not_skip_deferred_reasoning_blocks() {
+    ++    if cfg!(target_os = "windows") {
+    ++        // 该测试依赖 `sh`（用于最小化外部翻译器实现），Windows 上默认不可用。
+    ++        return;
+    ++    }
+    ++
+    ++    use codex_core::config::types::AgentReasoningTranslationConfig;
+    ++    use std::time::Duration;
+    ++
+    ++    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    ++    chat.config.agent_reasoning_translation = Some(AgentReasoningTranslationConfig {
+    ++        command: vec![
+    ++            "sh".to_string(),
+    ++            "-c".to_string(),
+    ++            r#"cat >/dev/null; printf '%s' '{"schema_version":1,"text":"**思考中**\\n\\n这里是中文翻译。"}'"#
+    ++                .to_string(),
+    ++        ],
+    ++        timeout: Duration::from_millis(2_000),
+    ++        ui_max_wait: Duration::from_millis(5_000),
+    ++    });
+    ++
+    ++    let thread_id = ThreadId::new();
+    ++    chat.thread_id = Some(thread_id);
+    ++
+    ++    // 推理块 1：先落盘原文推理摘要（对应真实运行时的 on_agent_reasoning_final）。
+    ++    chat.add_boxed_history(history_cell::new_reasoning_summary_block(
+    ++        "**Thinking**\n\nFirst reasoning.".to_string(),
+    ++    ));
+    ++
+    ++    // barrier 期间追加推理块 2（会进入 deferred 队列）。
+    ++    let request_id = chat
+    ++        .begin_agent_reasoning_body_translation_barrier(thread_id, Some("Thinking".to_string()))
+    ++        .expect("expected barrier to start");
+    ++    chat.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+    ++        ratatui::text::Line::from("AFTER_1"),
+    ++    ]));
+    ++    chat.add_boxed_history(history_cell::new_reasoning_summary_block(
+    ++        "**Thinking**\n\nSecond reasoning.".to_string(),
+    ++    ));
+    ++    chat.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+    ++        ratatui::text::Line::from("AFTER_2"),
+    ++    ]));
+    ++
+    ++    // 模拟推理块 1 的译文返回：这会触发 flush deferred，并应当为推理块 2 启动下一次翻译。
+    ++    chat.on_agent_reasoning_body_translated(
+    ++        request_id,
+    ++        thread_id,
+    ++        Some("Thinking".to_string()),
+    ++        Some("**思考中**\n\n这里是中文翻译。".to_string()),
+    ++        None,
+    ++    );
+    ++
+    ++    let mut combined: Vec<String> = Vec::new();
+    ++    let mut translation_cells_seen = 0usize;
+    ++    let mut saw_after_2 = false;
+    ++
+    ++    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    ++    while tokio::time::Instant::now() < deadline && (translation_cells_seen < 2 || !saw_after_2) {
+    ++        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    ++        let Ok(Some(ev)) = tokio::time::timeout(remaining, rx.recv()).await else {
+    ++            break;
+    ++        };
+    ++
+    ++        match ev {
+    ++            AppEvent::InsertHistoryCell(cell) => {
+    ++                let s = lines_to_single_string(&cell.display_lines(80));
+    ++                if s.contains("这里是中文翻译") {
+    ++                    translation_cells_seen += 1;
+    ++                }
+    ++                if s.contains("AFTER_2") {
+    ++                    saw_after_2 = true;
+    ++                }
+    ++                combined.push(s);
+    ++            }
+    ++            AppEvent::AgentReasoningBodyTranslated {
+    ++                request_id,
+    ++                thread_id,
+    ++                title,
+    ++                translated,
+    ++                error,
+    ++            } => chat.on_agent_reasoning_body_translated(
+    ++                request_id, thread_id, title, translated, error,
+    ++            ),
+    ++            _ => {}
+    ++        }
+    ++    }
+    ++
+    ++    fn find_idx(haystack: &[String], needle: &str) -> usize {
+    ++        haystack
+    ++            .iter()
+    ++            .position(|s| s.contains(needle))
+    ++            .unwrap_or_else(|| panic!("missing {needle:?} in {haystack:?}"))
+    ++    }
+    ++
+    ++    let idx_r1 = find_idx(&combined, "First reasoning");
+    ++    let idx_after_1 = find_idx(&combined, "AFTER_1");
+    ++    let idx_r2 = find_idx(&combined, "Second reasoning");
+    ++    let idx_after_2 = find_idx(&combined, "AFTER_2");
+    ++
+    ++    let translation_indices: Vec<usize> = combined
+    ++        .iter()
+    ++        .enumerate()
+    ++        .filter_map(|(idx, s)| s.contains("这里是中文翻译").then_some(idx))
+    ++        .collect();
+    ++    assert_eq!(
+    ++        translation_indices.len(),
+    ++        2,
+    ++        "expected 2 translation cells: {combined:?}"
+    ++    );
+    ++
+    ++    let idx_t1 = translation_indices[0];
+    ++    let idx_t2 = translation_indices[1];
+    ++    assert!(
+    ++        idx_r1 < idx_t1
+    ++            && idx_t1 < idx_after_1
+    ++            && idx_after_1 < idx_r2
+    ++            && idx_r2 < idx_t2
+    ++            && idx_t2 < idx_after_2,
+    ++        "unexpected insertion order: {combined:?}"
+    ++    );
+    ++}
+    ++
+    ++#[test]
+    ++fn extract_reasoning_body_for_translation_requires_header_and_body() {
+    ++    assert_eq!(extract_reasoning_body_for_translation("no header"), None);
+    ++    assert_eq!(extract_reasoning_body_for_translation("**Thinking**"), None);
+    ++    assert_eq!(
+    ++        extract_reasoning_body_for_translation("**Thinking**  hello"),
+    ++        Some("hello".to_string())
+    ++    );
+    ++    assert_eq!(
+    ++        extract_reasoning_body_for_translation("**Thinking**\n\nhello"),
+    ++        Some("hello".to_string())
+    ++    );
+    ++}
+    +
+    + ## codex-rs/tui/src/history_cell.rs ##
+    +@@ codex-rs/tui/src/history_cell.rs: impl ReasoningSummaryCell {
+    +         }
+    +     }
+    + 
+    ++    pub(crate) fn full_markdown_for_translation(&self) -> Option<String> {
+    ++        if self.transcript_only {
+    ++            return None;
+    ++        }
+    ++        if self._header.trim().is_empty() {
+    ++            return None;
+    ++        }
+    ++        Some(format!("{}{}", self._header, self.content))
+    ++    }
+    ++
+    +     fn lines(&self, width: u16) -> Vec<Line<'static>> {
+    +         let mut lines: Vec<Line<'static>> = Vec::new();
+    +         append_markdown(
+    +@@ codex-rs/tui/src/history_cell.rs: impl HistoryCell for ReasoningSummaryCell {
+    +     }
+    + }
+    + 
+    ++/// 推理（AgentReasoning）译文块。
+    ++///
+    ++/// 说明：
+    ++/// - 译文由后台任务生成；UI 收到后以独立块展示（不影响主流程）。
+    ++#[derive(Debug)]
+    ++pub(crate) struct AgentReasoningTranslationCell {
+    ++    title: Option<String>,
+    ++    content: String,
+    ++    is_error: bool,
+    ++}
+    ++
+    ++impl AgentReasoningTranslationCell {
+    ++    pub(crate) fn new(title: Option<String>, content: String, is_error: bool) -> Self {
+    ++        Self {
+    ++            title,
+    ++            content,
+    ++            is_error,
+    ++        }
+    ++    }
+    ++
+    ++    fn lines(&self, width: u16) -> Vec<Line<'static>> {
+    ++        let mut md_lines: Vec<Line<'static>> = Vec::new();
+    ++        append_markdown(
+    ++            &self.content,
+    ++            Some((width as usize).saturating_sub(4).max(1)),
+    ++            &mut md_lines,
+    ++        );
+    ++
+    ++        let translation_style = Style::default().dim();
+    ++        let styled_md_lines = md_lines
+    ++            .into_iter()
+    ++            .map(|mut line| {
+    ++                line.spans = line
+    ++                    .spans
+    ++                    .into_iter()
+    ++                    .map(|span| span.patch_style(translation_style))
+    ++                    .collect();
+    ++                line
+    ++            })
+    ++            .collect::<Vec<_>>();
+    ++
+    ++        if self.is_error {
+    ++            let mut out: Vec<Line<'static>> = Vec::new();
+    ++            let mut header: Vec<Span<'static>> = Vec::new();
+    ++            header.push("  └ ".dim());
+    ++            header.push("译文生成失败".red().bold());
+    ++            if let Some(title) = &self.title {
+    ++                header.push(" ".into());
+    ++                header.push(format!("({title})").dim());
+    ++            }
+    ++            out.push(Line::from(header));
+    ++            out.extend(word_wrap_lines(
+    ++                &styled_md_lines,
+    ++                RtOptions::new(width as usize)
+    ++                    .initial_indent("    ".into())
+    ++                    .subsequent_indent("    ".into()),
+    ++            ));
+    ++            return out;
+    ++        }
+    ++
+    ++        // 选项 B：成功时不额外显示 “└ 译文” 标题行，
+    ++        // 直接把译文正文作为子节点输出，避免比原文多一行“标签”。
+    ++        word_wrap_lines(
+    ++            &styled_md_lines,
+    ++            RtOptions::new(width as usize)
+    ++                .initial_indent("  └ ".dim().into())
+    ++                .subsequent_indent("    ".into()),
+    ++        )
+    ++    }
+    ++}
+    ++
+    ++impl HistoryCell for AgentReasoningTranslationCell {
+    ++    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+    ++        self.lines(width)
+    ++    }
+    ++
+    ++    fn desired_height(&self, width: u16) -> u16 {
+    ++        self.lines(width).len() as u16
+    ++    }
+    ++
+    ++    fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
+    ++        self.lines(width)
+    ++    }
+    ++
+    ++    fn desired_transcript_height(&self, width: u16) -> u16 {
+    ++        self.lines(width).len() as u16
+    ++    }
+    ++}
+    ++
+    + #[derive(Debug)]
+    + pub(crate) struct AgentMessageCell {
+    +     lines: Vec<Line<'static>>,
+    +@@ codex-rs/tui/src/history_cell.rs: pub(crate) fn new_reasoning_summary_block(full_reasoning_buffer: String) -> Box<
+    +     ))
+    + }
+    + 
+    ++pub(crate) fn new_agent_reasoning_translation_block(
+    ++    title: Option<String>,
+    ++    translated: String,
+    ++) -> Box<dyn HistoryCell> {
+    ++    Box::new(AgentReasoningTranslationCell::new(title, translated, false))
+    ++}
+    ++
+    ++pub(crate) fn new_agent_reasoning_translation_error_block(
+    ++    title: Option<String>,
+    ++    reason: String,
+    ++) -> Box<dyn HistoryCell> {
+    ++    Box::new(AgentReasoningTranslationCell::new(
+    ++        title,
+    ++        format!("译文生成失败：{reason}"),
+    ++        true,
+    ++    ))
+    ++}
+    ++
+    + #[derive(Debug)]
+    + /// A visual divider between turns, optionally showing how long the assistant "worked for".
+    + ///
+    +
+      ## docs/config.md ##
+     @@ docs/config.md: The generated JSON Schema for `config.toml` lives at `codex-rs/core/config.schem
+      Codex stores "do not show again" flags for some UI prompts under the `[notice]` table.
+    @@ docs/config.md: The generated JSON Schema for `config.toml` lives at `codex-rs/c
+     +本分支新增了一个**可选**的外部翻译命令钩子，用于把 `AgentReasoning`（TUI 里的 “Thinking/Analyzing…” 推理摘要）从英文翻译为中文，并以“原文 + 译文”方式展示。
+     +
+     +- 详细说明与插件协议：`docs/translation.md`
+    ++- 关键配置项（`~/.codex/config.toml`）：
+    ++  - `[translation.agent_reasoning] command = [...]`：外部翻译器命令（argv）
+    ++  - `timeout_ms`：外部命令执行超时（毫秒）
+    ++  - `ui_max_wait_ms`：TUI 对齐等待上限（毫秒；控制“译文紧跟原文”的缓冲等待时间）
+    ++  - 环境变量 `CODEX_TUI_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS` 可覆盖 `ui_max_wait_ms`
+     
+      ## docs/translation.md (new) ##
+     @@
+    @@ docs/translation.md (new)
+     +
+     +# 调用超时（毫秒）。用于避免外部命令卡死拖慢 UI。
+     +timeout_ms = 2000
+    ++
+    ++# UI 对齐等待上限（毫秒）。用于保证“译文紧跟原文”的短暂缓冲等待；
+    ++# 超时后会立刻放行后续输出，并在原文下方显示“译文生成失败：等待超时…”
+    ++ui_max_wait_ms = 5000
+     +```
+     +
+     +### 配合 profiles 使用
+    @@ docs/translation.md (new)
+     +    - 若缓存中已有该标题的译文，则状态栏显示为 `原文(译文)`（例如 `Thinking(思考中)`）。
+     +  - 推理正文（译文块）：
+     +    - 翻译在后台执行；
+    -+    - 译文块标题不再展示 `译文(英文标题)` 的冗余结构，而是直接展示**译后的主题**（从正文翻译结果解析）；
+    ++    - 译文不再额外展示 `└ 译文` 这类“标签行”，而是把译文正文直接作为子节点输出（第一行带 `└`）；
+     +    - 为了保证**译文紧跟原文**，TUI/TUI2 会在译文生成完成（或超时）前，**短暂缓冲后续的历史输出**，避免其它块插入导致错位。
+    -+    - 默认最多等待 5 秒；可用环境变量覆盖（单位：毫秒）：
+    ++    - 默认最多等待 5 秒；可在 `config.toml` 中设置 `translation.agent_reasoning.ui_max_wait_ms` 覆盖；
+    ++      也可用环境变量覆盖（单位：毫秒；优先级更高）：
+     +      - `CODEX_TUI_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS=5000`
+     +    - 超时后：会输出 `译文生成失败：等待超时...`，然后立刻放行并输出缓冲内容；晚到的译文将被丢弃（避免破坏“紧跟原文”的阅读顺序）。
+    -+    - 注意：这只是 UI 侧“对齐等待上限”，与 `translation.agent_reasoning.timeout_ms`（外部命令执行超时）是两回事；出网翻译建议把 `timeout_ms` 设得比 UI 等待上限更大一些（例如 8000ms / 15000ms）。
+    ++    - 注意：`ui_max_wait_ms` 只是 UI 侧“对齐等待上限”，与 `translation.agent_reasoning.timeout_ms`（外部命令执行超时）是两回事；出网翻译建议把 `timeout_ms` 设得**不小于** `ui_max_wait_ms`，避免 UI 先放行但翻译器还在跑。
+     +- **codex exec（human output）**
+     +  - 在输出推理原文后，后台翻译完成会打印一段 `译文`（不阻塞主事件处理；尽力在退出前输出已完成结果）。
+     +
+    @@ docs/translation.md (new)
+     +
+     +- `scripts/translate_agent_reasoning_openai_compatible.py`
+     +
+    -+使用前请配置环境变量（避免把密钥写入脚本）：
+    ++使用前请配置环境变量（避免把密钥写入脚本）。为减少每次启动终端手动 `export` 的成本，
+    ++示例脚本会尝试读取 env 文件并加载其中的 `KEY=VALUE`：
+    ++
+    ++> env 文件路径：`$CODEX_TRANSLATION_ENV_FILE`（若设置） > `~/.codex/translation.env`（默认）  
+    ++> 值优先级：**进程环境变量** > env 文件（仅当当前进程未设置同名 env 时才从文件注入）。
+    ++
+    ++示例（`~/.codex/translation.env`）：
+    ++
+    ++```bash
+    ++# OpenAI 兼容
+    ++CODEX_TRANSLATION_BASE_URL=https://api.openai.com/v1
+    ++CODEX_TRANSLATION_API_KEY=<your_api_key>
+    ++CODEX_TRANSLATION_MODEL=gpt-4.1-mini
+    ++
+    ++# Gemini（可选）
+    ++CODEX_GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta
+    ++CODEX_GEMINI_API_KEY=<your_api_key>
+    ++CODEX_GEMINI_MODEL=gemini-3-flash
+    ++CODEX_GEMINI_MAX_OUTPUT_TOKENS=4096
+    ++```
+     +
+     +- `CODEX_TRANSLATION_BASE_URL`（可选，默认使用 `$OPENAI_BASE_URL` 或 `https://api.openai.com/v1`）
+     +- `CODEX_TRANSLATION_API_KEY`（或直接复用 `$OPENAI_API_KEY`）
+    @@ docs/translation.md (new)
+     +
+     +- `scripts/translate_agent_reasoning_gemini.py`
+     +
+    -+使用前请配置环境变量：
+    ++使用前请配置环境变量。为减少每次启动终端手动 `export` 的成本，
+    ++示例脚本会尝试读取 env 文件并加载其中的 `KEY=VALUE`：
+    ++
+    ++> env 文件路径：`$CODEX_TRANSLATION_ENV_FILE`（若设置） > `~/.codex/translation.env`（默认）  
+    ++> 值优先级：**进程环境变量** > env 文件（仅当当前进程未设置同名 env 时才从文件注入）。
+     +
+     +- `CODEX_GEMINI_BASE_URL`（可选，默认 `https://generativelanguage.googleapis.com/v1beta`）
+     +- `CODEX_GEMINI_API_KEY`
+    @@ docs/translation.md (new)
+     +如果你的 Gemini 服务是通过代理网关暴露的（例如你给出的 URL 形如：
+     +`https://<host>/gemini/v1beta/models/<model>:generateContent`），推荐的配置方式是：
+     +
+    -+1. **把 Base URL 与模型写在 env 文件里**（避免每次手敲；同时不要把 key 提交到 git）  
+    -+   参考：`scripts/gemini_crs1.env.example`
+    ++1. **把 Base URL / 模型 / API Key 写入私有 env 文件**（避免每次手敲；同时不要把 key 提交到 git）  
+    ++   推荐放在：`~/.codex/translation.env`（示例脚本会自动读取），或通过 `CODEX_TRANSLATION_ENV_FILE` 指定路径  
+    ++   参考：`scripts/gemini_crs1.env.example`（可直接复制并按需改名/路径）
+     +
+    -+2. 在启动 Codex 前加载环境变量（只对当前终端会话生效）：
+    ++2. （可选）确保文件权限仅当前用户可读：
+     +
+     +   ```bash
+    -+   set -a
+    -+   source /path/to/your_private_gemini.env
+    -+   set +a
+    ++   chmod 700 ~/.codex
+    ++   chmod 600 ~/.codex/translation.env
+     +   ```
+     +
+     +3. 确保你设置的是：
+    @@ scripts/translate_agent_reasoning_dummy.py (new)
+     +  [translation.agent_reasoning]
+     +  command = ["python3", "/path/to/translate_agent_reasoning_dummy.py"]
+     +  timeout_ms = 2000
+    ++  ui_max_wait_ms = 5000
+     +
+     +协议：从 stdin 读取 JSON 请求，向 stdout 输出 JSON 响应。
+     +"""
+    @@ scripts/translate_agent_reasoning_dummy.py (new)
+     +
+     +if __name__ == "__main__":
+     +    raise SystemExit(main())
+    -+
+     
+      ## scripts/translate_agent_reasoning_gemini.py (new) ##
+     @@
+    @@ scripts/translate_agent_reasoning_gemini.py (new)
+     +
+     +特点：
+     +- 不依赖第三方包（仅标准库）。
+    -+- 通过环境变量配置 base_url / api_key / model。
+    ++- 通过环境变量配置 base_url / api_key / model（也支持从 env 文件读取：`$CODEX_TRANSLATION_ENV_FILE` 或默认 `~/.codex/translation.env`）。
+     +- 从 stdin 读取 JSON 请求，向 stdout 输出 JSON 响应（协议见 docs/translation.md）。
+     +
+     +使用方式（示例）：
+    @@ scripts/translate_agent_reasoning_gemini.py (new)
+     +  [translation.agent_reasoning]
+     +  command = ["python3", "/path/to/translate_agent_reasoning_gemini.py"]
+     +  timeout_ms = 8000
+    ++  ui_max_wait_ms = 5000
+     +
+     +环境变量：
+     +- CODEX_GEMINI_BASE_URL：Gemini API Base URL
+    @@ scripts/translate_agent_reasoning_gemini.py (new)
+     +
+     +
+     +DEFAULT_MAX_OUTPUT_TOKENS = 4096
+    ++DEFAULT_ENV_FILE = os.path.expanduser("~/.codex/translation.env")
+    ++ENV_FILE_OVERRIDE_ENV = "CODEX_TRANSLATION_ENV_FILE"
+    ++
+    ++
+    ++def _env_file_path() -> str:
+    ++    override = os.environ.get(ENV_FILE_OVERRIDE_ENV, "").strip()
+    ++    if override:
+    ++        return os.path.expanduser(override)
+    ++    return DEFAULT_ENV_FILE
+    ++
+    ++
+    ++def _maybe_load_env_file(path: str) -> None:
+    ++    """
+    ++    从 `KEY=VALUE` 文本文件加载环境变量（仅当当前进程未设置同名 env 时才写入）。
+    ++
+    ++    设计目标：
+    ++    - 让翻译脚本在被 Codex 作为外部命令调用时也能自动拿到 KEY/URL 等配置；
+    ++    - 避免用户每次打开终端都手动 export；
+    ++    - 环境变量仍可覆盖文件（优先级：进程 env > 文件）。
+    ++
+    ++    文件格式（最小约定）：
+    ++    - 允许空行与以 `#` 开头的注释
+    ++    - 允许 `export KEY=VALUE`
+    ++    - 值可用单/双引号包裹（仅去掉首尾同类引号，不做复杂转义）
+    ++    """
+    ++    try:
+    ++        with open(path, encoding="utf-8") as f:
+    ++            lines = list(f)
+    ++    except FileNotFoundError:
+    ++        return
+    ++    except Exception as e:  # noqa: BLE001 - 示例脚本直接返回可读错误
+    ++        sys.stderr.write(f"cannot_read_translation_env:{path}:{e}\n")
+    ++        return
+    ++
+    ++    for line_no, raw in enumerate(lines, start=1):
+    ++        line = raw.strip()
+    ++        if not line or line.startswith("#"):
+    ++            continue
+    ++
+    ++        if line.startswith("export "):
+    ++            line = line[len("export ") :].strip()
+    ++        if "=" not in line:
+    ++            sys.stderr.write(f"invalid_translation_env_line:{path}:{line_no}:{raw.strip()}\n")
+    ++            continue
+    ++
+    ++        key, value = line.split("=", 1)
+    ++        key = key.strip()
+    ++        value = value.strip()
+    ++        if not key:
+    ++            sys.stderr.write(f"invalid_translation_env_key:{path}:{line_no}\n")
+    ++            continue
+    ++
+    ++        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+    ++            value = value[1:-1]
+    ++
+    ++        if key not in os.environ:
+    ++            os.environ[key] = value
+     +
+     +
+     +def _get_env(name: str) -> str | None:
+    @@ scripts/translate_agent_reasoning_gemini.py (new)
+     +
+     +
+     +def main() -> int:
+    ++    _maybe_load_env_file(_env_file_path())
+     +    try:
+     +        req = json.load(sys.stdin)
+     +    except Exception as e:  # noqa: BLE001
+    @@ scripts/translate_agent_reasoning_openai_compatible.py (new)
+     +
+     +特点：
+     +- 不依赖第三方包（仅标准库）。
+    -+- 通过环境变量配置 base_url / api_key / model。
+    ++- 通过环境变量配置 base_url / api_key / model（也支持从 env 文件读取：`$CODEX_TRANSLATION_ENV_FILE` 或默认 `~/.codex/translation.env`）。
+     +- 从 stdin 读取 JSON 请求，向 stdout 输出 JSON 响应（协议见 docs/translation.md）。
+     +
+     +使用方式（示例）：
+    @@ scripts/translate_agent_reasoning_openai_compatible.py (new)
+     +  [translation.agent_reasoning]
+     +  command = ["python3", "/path/to/translate_agent_reasoning_openai_compatible.py"]
+     +  timeout_ms = 8000
+    ++  ui_max_wait_ms = 5000
+     +
+     +环境变量：
+     +- CODEX_TRANSLATION_BASE_URL：OpenAI 兼容 API Base URL（默认：$OPENAI_BASE_URL 或 https://api.openai.com/v1）
+    @@ scripts/translate_agent_reasoning_openai_compatible.py (new)
+     +import urllib.request
+     +
+     +
+    ++DEFAULT_ENV_FILE = os.path.expanduser("~/.codex/translation.env")
+    ++ENV_FILE_OVERRIDE_ENV = "CODEX_TRANSLATION_ENV_FILE"
+    ++
+    ++
+    ++def _env_file_path() -> str:
+    ++    override = os.environ.get(ENV_FILE_OVERRIDE_ENV, "").strip()
+    ++    if override:
+    ++        return os.path.expanduser(override)
+    ++    return DEFAULT_ENV_FILE
+    ++
+    ++
+    ++def _maybe_load_env_file(path: str) -> None:
+    ++    """
+    ++    从 `KEY=VALUE` 文本文件加载环境变量（仅当当前进程未设置同名 env 时才写入）。
+    ++
+    ++    设计目标：
+    ++    - 让翻译脚本在被 Codex 作为外部命令调用时也能自动拿到 KEY/URL 等配置；
+    ++    - 避免用户每次打开终端都手动 export；
+    ++    - 环境变量仍可覆盖文件（优先级：进程 env > 文件）。
+    ++
+    ++    文件格式（最小约定）：
+    ++    - 允许空行与以 `#` 开头的注释
+    ++    - 允许 `export KEY=VALUE`
+    ++    - 值可用单/双引号包裹（仅去掉首尾同类引号，不做复杂转义）
+    ++    """
+    ++    try:
+    ++        with open(path, encoding="utf-8") as f:
+    ++            lines = list(f)
+    ++    except FileNotFoundError:
+    ++        return
+    ++    except Exception as e:  # noqa: BLE001 - 示例脚本直接返回可读错误
+    ++        sys.stderr.write(f"cannot_read_translation_env:{path}:{e}\n")
+    ++        return
+    ++
+    ++    for line_no, raw in enumerate(lines, start=1):
+    ++        line = raw.strip()
+    ++        if not line or line.startswith("#"):
+    ++            continue
+    ++
+    ++        if line.startswith("export "):
+    ++            line = line[len("export ") :].strip()
+    ++        if "=" not in line:
+    ++            sys.stderr.write(f"invalid_translation_env_line:{path}:{line_no}:{raw.strip()}\n")
+    ++            continue
+    ++
+    ++        key, value = line.split("=", 1)
+    ++        key = key.strip()
+    ++        value = value.strip()
+    ++        if not key:
+    ++            sys.stderr.write(f"invalid_translation_env_key:{path}:{line_no}\n")
+    ++            continue
+    ++
+    ++        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+    ++            value = value[1:-1]
+    ++
+    ++        if key not in os.environ:
+    ++            os.environ[key] = value
+    ++
+    ++
+     +def _get_env(name: str) -> str | None:
+     +    value = os.environ.get(name)
+     +    if value is None:
+    @@ scripts/translate_agent_reasoning_openai_compatible.py (new)
+     +
+     +
+     +def main() -> int:
+    ++    _maybe_load_env_file(_env_file_path())
+     +    try:
+     +        req = json.load(sys.stdin)
+     +    except Exception as e:  # noqa: BLE001
+ 2:  cff06418e <  -:  --------- feat(exec): 推理译文异步输出
+ 3:  43c389d5b <  -:  --------- feat(tui): 推理译文紧贴展示（含 tui2）
+ 4:  249c5e318 <  -:  --------- test(core): WSL 下跳过 PowerShell 安全断言
+ 5:  7193629ae <  -:  --------- chore(core): reqwest 启用 native-tls-vendored
+ 6:  089995809 <  -:  --------- fix(tui): 成功译文不再显示└ 译文标签
+ 7:  710103618 <  -:  --------- docs(scripts): 示例翻译器支持读取env文件
+ 8:  8c8cec3e9 <  -:  --------- feat(translation): 增加ui_max_wait_ms并接入TUI
+ 9:  41bf6a2ef <  -:  --------- docs: 补充ui_max_wait_ms配置说明
+10:  9e73d4f81 <  -:  --------- chore(dev): 增加上游同步脚本并补充维护文档
+11:  94b95bf2f <  -:  --------- fix(core): 翻译配置补齐 JsonSchema 以兼容配置 schema
+12:  8261ea375 <  -:  --------- fix(tui,tui2): 推理译文块避免二次换行导致挤压
+13:  c127981b7 <  -:  --------- docs: 补充推理译文插件对外说明与预览图（便于公开仓库使用）
+14:  f19178566 <  -:  --------- fix(core): 更新配置 schema 并修复 shell_snapshot 超时测试（避免 Linux ETXTBSY）
+15:  ab6d074f7 <  -:  --------- docs: 默认中文 README 并补齐公开说明（便于社区使用）
+16:  f69837d33 <  -:  --------- chore(scripts): 同步脚本默认对齐稳定 tag（便于复现）
+17:  20f72c8cd <  -:  --------- docs: 使用截图作为效果预览图（更贴近真实界面）
+18:  4464efa97 <  -:  --------- docs: README 增加 issue 反馈指引
+19:  67e05aea7 <  -:  --------- fix(tui): 补齐推理翻译字段初始化（修复编译）
+20:  94882ec71 <  -:  --------- test(tui): 更新 status 快照（对齐 v0.92.0）
+21:  e4e31f33a <  -:  --------- chore(dev,docs): dev-sync 验证兼容无 tui2
+22:  286125a06 <  -:  --------- chore: 更新 Cargo.lock 与格式（对齐 v0.92.0）
+23:  541c259eb <  -:  --------- fix(tui): new_with_op_sender 补齐协作模式指示器同步
+24:  6fab570bb <  -:  --------- chore(dev): dev-sync 更稳健地判断是否运行 tui2 测试
+25:  88458ddc5 <  -:  --------- docs: 补充 all-features 下 libclang 缺失的排查
+26:  2fc5f2ccf <  -:  --------- chore(ci): 默认分支 push 也触发工作流
+ -:  --------- >  2:  d82a49f6e chore(dev): 增强上游同步与开发验证，提升推理译文链路稳定性
+27:  88576a608 !  3:  584cc60ef chore(ci): fork-ci 作为默认分支公开门槛（Ubuntu-only; 4 命令）
+    @@ Metadata
+     Author: envy <envy@example.com>
+     
+      ## Commit message ##
+    -    chore(ci): fork-ci 作为默认分支公开门槛（Ubuntu-only; 4 命令）
+    +    chore(ci,plan): 增加 fork-ci 门禁并补齐执行合约
+     
+    -    做了什么：
+    -    - 新增 fork-ci 工作流：仅 Ubuntu，且只运行 4 条 cargo 命令，作为默认分支的 CI 信号
+    -    - 撤回默认分支触发扩展：revert 2fc5f2ccf 对上游 workflows 的触发修改，减少与 upstream 的偏离
+    -    - 记录执行计划与 issues 契约（plan/ + issues/），便于后续审计与复现
+    -
+    -    为什么：
+    -    - 上游 rust-ci 等流程依赖自建 runner（fork 无法满足），会导致默认分支长期红；需要轻量且可持续的 CI 门槛
+    -    - 将上游 workflows 恢复到更接近原样，可降低后续 rebase 合并冲突风险
+    -
+    - ## .github/workflows/cargo-deny.yml ##
+    -@@ .github/workflows/cargo-deny.yml: on:
+    -   push:
+    -     branches:
+    -       - main
+    --      - feat/agent-reasoning-translation-plugin
+    - 
+    - jobs:
+    -   cargo-deny:
+    -
+    - ## .github/workflows/ci.yml ##
+    -@@ .github/workflows/ci.yml: name: ci
+    - 
+    - on:
+    -   pull_request: {}
+    --  push: { branches: [main, feat/agent-reasoning-translation-plugin] }
+    -+  push: { branches: [main] }
+    - 
+    - jobs:
+    -   build-test:
+    -
+    - ## .github/workflows/codespell.yml ##
+    -@@ .github/workflows/codespell.yml: name: Codespell
+    - 
+    - on:
+    -   push:
+    --    branches: [main, feat/agent-reasoning-translation-plugin]
+    -+    branches: [main]
+    -   pull_request:
+    --    branches: [main, feat/agent-reasoning-translation-plugin]
+    -+    branches: [main]
+    - 
+    - permissions:
+    -   contents: read
+    +    做了什么：调整 CI/workflow 触发策略并加入 Ubuntu-only 的 fork-ci 门槛，同时新增“缩差异/降冲突”计划与 issues 执行合约。
+    +    为什么：把维护流程显式化并前置门禁，降低后续同步/回归的不确定性。
+     
+      ## .github/workflows/fork-ci.yml (new) ##
+     @@
+    @@ .github/workflows/fork-ci.yml (new)
+     +      - name: cargo test -p codex-tui
+     +        run: cargo test -p codex-tui
+     
+    - ## .github/workflows/rust-ci.yml ##
+    -@@ .github/workflows/rust-ci.yml: on:
+    -   push:
+    -     branches:
+    -       - main
+    --      - feat/agent-reasoning-translation-plugin
+    -   workflow_dispatch:
+    - 
+    - # CI builds in debug (dev) for faster signal.
+    -
+    - ## .github/workflows/sdk.yml ##
+    -@@ .github/workflows/sdk.yml: name: sdk
+    - 
+    - on:
+    -   push:
+    --    branches: [main, feat/agent-reasoning-translation-plugin]
+    -+    branches: [main]
+    -   pull_request: {}
+    - 
+    - jobs:
+    -
+      ## issues/2026-01-30_12-11-29-fork-ci-ubuntu-only.csv (new) ##
+     @@
+     +ID,Title,Description,Acceptance,Test_Method,Tools,Dev_Status,Review1_Status,Regression_Status,Files,Dependencies,Notes
+    @@ issues/2026-01-30_12-11-29-fork-ci-ubuntu-only.csv (new)
+     +A4,本地回归：仅跑 4 条 cargo 命令,在本地 codex-rs 目录按约束仅运行 4 条命令以证明翻译功能与 TUI 不回归,4 条命令全部 exit=0 且无失败测试,执行命令并保留输出摘要到 Notes（或终端日志）,"cargo/shell",DONE,TODO,DONE,codex-rs,A1,本地结果: 4/4 通过
+     +A5,远程验证：push 后仅 fork-ci 触发且为绿,推送变更到远程默认分支后验证公开社区看到的 CI 信号稳定可复现,gh run list 显示仅 fork-ci 对应本次提交且结论为 success; 不出现 rust-ci 等失败 runs,使用 gh run list/gh run view 提取 run 链接与结论写入 Notes,gh/shell,DOING,TODO,TODO,.github/workflows/;repo-actions-settings,A3;A4,等待你确认 commit+push 后执行
+     
+    + ## issues/2026-01-30_14-10-49-minimize-upstream-diff.csv (new) ##
+    +@@
+    ++ID,Title,Description,Acceptance,Test_Method,Tools,Dev_Status,Review1_Status,Regression_Status,Files,Dependencies,Notes
+    ++A1,Baseline：量化差异与冲突探针,在不改代码前先量化当前分支相对 rust-v0.92.0 的差异面，并用 merge-tree 对 rust-v0.93.0-alpha.17 做冲突探针（仅预测趋势，不做真正 rebase）,产出可复核的 baseline 记录（diffstat/numstat/冲突探针输出）并可在后续 Phase 对比,运行并保存以下输出摘要：git diff --stat rust-v0.92.0..HEAD；git diff --numstat rust-v0.92.0..HEAD -- <热文件清单>；git merge-tree --write-tree --messages HEAD rust-v0.93.0-alpha.17 | rg \"^CONFLICT\",git/shell,TODO,TODO,TODO,plan/2026-01-30_14-10-49-minimize-upstream-diff.md;codex-rs/tui/src/chatwidget.rs;codex-rs/tui/src/bottom_pane/footer.rs;codex-rs/core/src/config/mod.rs,none,热文件清单建议与 plan 保持一致；该 issue 只读不改代码
+    ++A2,变更分层清单：必须/可下沉/可移除,按文件+提交归因把当前补丁栈变更分为三类：必须保留（翻译核心链路）、可下沉（迁移到新模块以减少热文件侵入）、可移除（与翻译无关且占用差异预算）,形成一份“分层清单”并明确每项理由与风险；并明确哪些项需要额外用户确认（例如重写历史）,静态审计 git log 与 git diff；必要时用 git show <commit> 辅助归因,git/shell,TODO,TODO,TODO,plan/2026-01-30_14-10-49-minimize-upstream-diff.md, A1,禁止拍脑袋删除；任何“可移除”必须说明与翻译无关的证据
+    ++A3,缩差异：回退/拆分非翻译核心改动（热文件差异预算）,优先处理与翻译无关但会放大 future rebase 冲突的改动：例如 core 依赖 feature 偏离、shell/snapshot 测试稳定性调整、footer.rs 的 WSL 探测相关改动、生成物 schema 的合并策略等,相对 rust-v0.92.0 的热文件 numstat 下降且功能不回归；所有回退/拆分都有明确理由与证据,对候选文件逐项处理并在完成后复跑 A1 的 numstat（只针对热文件）；并在末尾跑一次约束回归（见 A6）,git/shell;cargo/shell,TODO,TODO,TODO,codex-rs/core/Cargo.toml;codex-rs/core/src/shell_snapshot.rs;codex-rs/core/src/tools/handlers/shell.rs;codex-rs/tui/src/bottom_pane/footer.rs;codex-rs/core/config.schema.json,A2,只做“与翻译无关”的最小回退/拆分；不要引入吞错/默认值掩盖失败
+    ++A4,降冲突：抽离翻译编排/状态机出 chatwidget.rs,把推理译文的 orchestrator/barrier/deferred 等复杂状态机迁移到新模块/新文件（例如 chatwidget 子模块），让 chatwidget.rs 保持薄入口与委托调用，从根因减少热文件冲突面,chatwidget.rs 的翻译相关改动行数显著下降且行为不变（译文插入策略/异步不阻塞/request+thread 防串台/超时释放等）,实现迁移后跑 A6 约束回归；必要时补充/调整 codex-tui 的相关单测或快照，确保状态机行为可被自动验证,cargo/shell,TODO,TODO,TODO,codex-rs/tui/src/chatwidget.rs;codex-rs/tui/src/app.rs;codex-rs/tui/src/app_event.rs;codex-rs/tui/src/history_cell.rs,A2,优先“新增文件承载复杂逻辑”；避免无意义重排/格式化导致冲突放大
+    ++A5,降冲突：拆分 chatwidget 翻译相关测试到子模块,把翻译相关的大块测试从 codex-rs/tui/src/chatwidget/tests.rs 下沉到更小的 tests 子模块/文件，降低同文件未来冲突概率并提升可读性,tests.rs 的翻译相关内容迁移完成且 codex-tui 测试通过；测试覆盖 barrier/deferred/插入顺序/失败展示等关键路径,运行 cargo test -p codex-tui（按约束）；若产生快照变更则按仓库惯例审阅并更新,cargo/shell,TODO,TODO,TODO,codex-rs/tui/src/chatwidget/tests.rs,A4,保持测试语义不变；不要为了拆分而删覆盖
+    ++A6,回归：按约束跑 fmt + 4 条命令,在每个阶段性缩差异改动后执行约束回归集合，确保翻译功能与 TUI 不回归,just fmt + 4 条 cargo 命令全部 exit=0,执行：cd codex-rs && just fmt；cargo test -p codex-core translation；cargo test -p codex-exec；cargo build -p codex-cli；cargo test -p codex-tui,cargo/shell,TODO,TODO,TODO,codex-rs,A3;A4;A5,严格遵守“只跑相关测试”；不要跑 cargo test --all-features
+    ++A7,回测：重新量化差异并对比 baseline,完成缩差异改动后重新执行 A1 的量化步骤，对比差异面与冲突探针是否下降或至少不增加,输出对比结论：热文件 numstat 相对 baseline 明显下降；冲突探针项不增加且优先减少 footer.rs 相关冲突,复跑 A1 并把结果与 baseline 对比（至少记录 diffstat/numstat/CONFLICT 列表差异）,git/shell,TODO,TODO,TODO,plan/2026-01-30_14-10-49-minimize-upstream-diff.md,A6,该 issue 不要求“文件数最少”，只关注“热文件侵入度”和“冲突探针项”
+    ++B1,（可选）补丁栈卫生：squash/reword/reorder 降低未来 rebase 重放冲突,在确认需要时对补丁栈做交互式 rebase（squash/reword/reorder），把翻译功能收敛为少量稳定 commits；该步骤会导致需要 force-with-lease push,在获得二次书面确认后执行；完成后远程分支可正常被拉取且回归仍通过,执行前必须再次确认“允许 --force-with-lease”；执行后复跑 A6；并验证 origin/feat/agent-reasoning-translation-plugin 与本地一致,git/shell,TODO,TODO,TODO,git-history,A7,高风险操作：只在你明确要求“降低未来 rebase 按 commit 重放冲突”时执行
+    +
+      ## plan/2026-01-30_12-11-29-fork-ci-ubuntu-only.md (new) ##
+     @@
+     +---
+    @@ plan/2026-01-30_12-11-29-fork-ci-ubuntu-only.md (new)
+     +- `.github/workflows/rust-ci.yml`（存在 `runs-on: { group: codex-runners, ... }` 依赖，fork 无此 runner group）。
+     +- `.github/workflows/bazel.yml`（包含非 Ubuntu runner/架构矩阵）。
+     +- `.github/workflows/ci.yml` / `.github/workflows/sdk.yml` / `.github/workflows/cargo-deny.yml` / `.github/workflows/codespell.yml` / `.github/workflows/shell-tool-mcp-ci.yml`
+    +
+    + ## plan/2026-01-30_14-10-49-minimize-upstream-diff.md (new) ##
+    +@@
+    ++---
+    ++mode: plan
+    ++task: 最小入侵缩差异并降低后续合并冲突风险
+    ++created_at: "2026-01-30T14:18:42+08:00"
+    ++complexity: complex
+    ++---
+    ++
+    ++# Plan: 最小入侵缩小翻译插件差异面并降低后续合并冲突风险（基于 rust-v0.92.0）
+    ++
+    ++## Goal
+    ++- 在不破坏“推理翻译插件（think 翻译）”关键行为的前提下：
+    ++  - 显著降低对 upstream 热文件的侵入（优先：`codex-rs/tui/src/chatwidget.rs`、`codex-rs/tui/src/bottom_pane/footer.rs`、`codex-rs/core/src/config/mod.rs`）。
+    ++  - 缩小相对 `rust-v0.92.0` 的差异噪声，减少未来同步上游 release tag 时的合并冲突概率与解决成本。
+    ++- 维持公开仓库可持续门槛：Ubuntu-only 的 fork CI 继续稳定通过（不扩大 CI 面、不恢复上游重型 workflows）。
+    ++
+    ++## Scope
+    ++- In:
+    ++  - 以“量化证据”建立 baseline（diffstat、热文件 numstat、merge-tree 冲突探针）。
+    ++  - 识别并处理“非翻译核心但高冲突风险/高噪声”的改动点（优先从热文件与依赖/生成物入手）。
+    ++  - 将翻译编排/状态机从热文件下沉到新模块/新文件，热文件仅保留薄入口与事件转发。
+    ++  - （可选）补丁栈卫生（squash/reword/reorder）以降低“未来 rebase 按提交重放”时的冲突概率；该步骤必须二次确认。
+    ++- Out:
+    ++  - 不跟随 `upstream/main` 做开发分支同步（仍以 release tags 为基线）。
+    ++  - 不引入新的翻译能力（如流式 token 级翻译、多语言策略等）。
+    ++  - 不扩大/恢复上游重型 CI workflows（维持最小侵入与最小维护成本）。
+    ++
+    ++## Assumptions / Dependencies
+    ++- 当前分支：`feat/agent-reasoning-translation-plugin`，且工作区干净、本地与远程一致。
+    ++- 基线策略：以 release tag 为基线（当前稳定 tag 为 `rust-v0.92.0`），同步方式参考 `scripts/dev-sync-upstream.sh`。
+    ++- 回归约束：仅跑 `just fmt` + 以下 4 条命令（工作目录 `codex-rs`）：
+    ++  - `cargo test -p codex-core translation`
+    ++  - `cargo test -p codex-exec`
+    ++  - `cargo build -p codex-cli`
+    ++  - `cargo test -p codex-tui`
+    ++
+    ++## Phases
+    ++1. Baseline 量化与变更分类（只读）
+    ++   - 量化差异：
+    ++     - `git diff --stat rust-v0.92.0..HEAD`
+    ++     - `git diff --numstat rust-v0.92.0..HEAD -- codex-rs/tui/src/chatwidget.rs codex-rs/tui/src/bottom_pane/footer.rs codex-rs/core/src/config/mod.rs codex-rs/core/src/config/types.rs codex-rs/tui/src/history_cell.rs`
+    ++   - 冲突探针（不做真正 rebase，只预测趋势）：
+    ++     - `git merge-tree --write-tree --messages HEAD rust-v0.93.0-alpha.17 | rg "^CONFLICT"`
+    ++   - 输出“变更分层清单”（按文件/提交归因）：
+    ++     - 必须保留：翻译核心链路（默认关闭、`command=[]` 显式关闭、异步不阻塞、request/thread 防串台、译文插入策略等）。
+    ++     - 可下沉：把复杂逻辑迁移到新模块/新文件，减少热文件侵入。
+    ++     - 可移除：与翻译无关且占用差异预算的改动（只在证据充分时执行，避免拍脑袋删）。
+    ++
+    ++2. 缩差异落地（最小入侵优先）
+    ++   - 先处理“非翻译核心但高噪声/高冲突风险”的改动点（目标：减少热文件侵入与未来冲突）。候选方向（以 Phase 1 分类结果为准）：
+    ++     - `codex-rs/core/Cargo.toml` 中与翻译无关的依赖 feature 偏离（例如 `reqwest` 的额外 feature）。
+    ++     - `codex-rs/core/src/shell_snapshot.rs` / `codex-rs/core/src/tools/handlers/shell.rs` 的测试稳定性相关改动（若与翻译无关，优先拆分或回退，避免占用热文件差异预算）。
+    ++     - 生成物 `codex-rs/core/config.schema.json`：冲突时优先用流程重建（而非手工合并）。
+    ++   - 抽离翻译编排/状态机（保留行为不变）：
+    ++     - 建议形态：抽出 `TranslationOrchestrator`（或 Barrier State Machine）到新模块/新文件（例如 `codex-rs/tui/src/chatwidget/agent_reasoning_translation.rs`）。
+    ++       - 原则：热文件只保留“薄入口 + 委托”，复杂逻辑/状态机留在新文件里。
+    ++       - 若需要进一步解耦 UI：用“effects/command 列表”从 orchestrator 返回（例如 UpdateStatusHeader/SpawnTask/EmitCell/FlushDeferred）。
+    ++     - `codex-rs/tui/src/chatwidget.rs` 目标形态：字段持有 + 入口委托 + 事件转发（尽量减少业务逻辑行数）。
+    ++     - 测试拆分：把翻译相关测试从 `codex-rs/tui/src/chatwidget/tests.rs` 下沉到更小的子模块（降低同文件冲突概率）。
+    ++   - 对齐上游演进方向以消除结构性冲突根因：
+    ++     - 对 `codex-rs/tui/src/bottom_pane/footer.rs` 的冲突，优先沿用上游“props 注入（例如 is_wsl）/footer 纯渲染”的结构，避免在 footer 内做环境探测（从根因上降低未来冲突）。
+    ++3. 回归验证 + 风险回测（严格按约束）
+    ++   - 运行：`just fmt` + 4 条 cargo 命令（见 Tests & Verification）。
+    ++   - 重新跑 Phase 1 的量化指标，对比“热文件 numstat/冲突探针项”是否下降或至少不增加。
+    ++
+    ++4. （可选，需二次确认）补丁栈卫生（降低未来 rebase 按提交重放的冲突概率）
+    ++   - 背景：若仅通过新增提交“搬走逻辑”，历史上早期的大改动提交在未来 rebase 时仍会被重放，冲突仍可能发生。
+    ++   - 手段：交互式 rebase（squash/reword/reorder），把翻译功能收敛为少量稳定 commits（例如：core/exec/tui/文档/脚本 分组）。
+    ++   - 风险：需要 `--force-with-lease` push。
+    ++   - 该 Phase 必须单独获得书面确认后才执行。
+    ++
+    ++## Tests & Verification
+    ++- 格式化：`just fmt`（在 `codex-rs` 目录）。
+    ++- 功能回归（在 `codex-rs` 目录）：
+    ++  - `cargo test -p codex-core translation`
+    ++  - `cargo test -p codex-exec`
+    ++  - `cargo build -p codex-cli`
+    ++  - `cargo test -p codex-tui`
+    ++- 量化验收（可复核证据）：
+    ++  - 热文件侵入度：`chatwidget.rs` / `footer.rs` / `config/mod.rs` 的 `--numstat` 相比 baseline 明显下降（目标：至少降低 30%，最终阈值以 Phase 1 baseline 决定）。
+    ++  - 冲突探针项：`git merge-tree ...` 的 `CONFLICT` 项数不增加，优先消除 `footer.rs` 相关冲突。
+    ++
+    ++## Issue CSV
+    ++- Path: issues/2026-01-30_14-10-49-minimize-upstream-diff.csv
+    ++- Must share the same timestamp/slug as this plan.
+    ++
+    ++## Execution Strategy（Plan 阶段一次性对齐，避免执行中反复打断）
+    ++- Mode: normal-batch
+    ++- Entry skill: $issue-batch
+    ++- Commit policy: manual
+    ++- Plan audit before execution: yes
+    ++- Use git worktree: no
+    ++- Regression: per-issue quick regression + final regression（仅限本计划约束的命令集合）
+    ++
+    ++## Tools / MCP
+    ++- 本地：git、rg、cargo、just。
+    ++- 冲突预测：`git merge-tree`。
+    ++- 多 agent 审计（本 plan 已完成）：
+    ++  - 内置 spawn_agent：`019c0d41-e8a0-7763-b74d-c633fc6db6ef`、`019c0d41-d742-7021-b1d1-0b53916c3b8d`。
+    ++  - 外置协作：Claude（Opus）SESSION_ID：`601070f9-8b44-424f-ab4f-7efb0bfaaf60`；Gemini SESSION_ID：`1d46626a-183d-400a-bda8-1d17ba338b78`。
+    ++
+    ++## Acceptance Checklist
+    ++- [ ] Phase 1 输出可复核 baseline：diffstat/numstat/冲突探针结果 + 变更分层清单。
+    ++- [ ] 在不破坏关键行为（默认关闭/`command=[]` 显式关闭/异步不阻塞/request+thread 防串台/译文紧贴或明确降级决策）的前提下，热文件侵入度显著下降。
+    ++- [ ] `just fmt` + 4 条 cargo 命令通过。
+    ++- [ ] 冲突探针项不增加；优先消除 `footer.rs` 冲突根因。
+    ++
+    ++## Risks / Blockers
+    ++- barrier/deferred 机制是高复杂度点，缩差异重构容易引入顺序错乱/丢消息/卡住。
+    ++- 若不做 Phase 4（补丁栈卫生），未来 rebase 仍可能在“历史早期大改动提交”处发生冲突（即便最终 diff 已变小）。
+    ++- 生成物（如 `config.schema.json`）的手工合并容易出错，应通过流程而非手改解决。
+    ++
+    ++## Rollback / Recovery
+    ++- 执行前创建本地备份分支（不推送）：`backup/2026-01-30-minimize-upstream-diff`。
+    ++- 单点回滚：优先 `git revert <commit>`，保持可追溯。
+    ++- 运行时止血：通过 config 将 `translation.agent_reasoning.command = []` 显式关闭（不改代码即可关闭功能）。
+    ++
+    ++## Checkpoints
+    ++- Commit after: Phase 2 完成且 Phase 3 约束回归通过（COMMIT_POLICY=manual，由人工决定是否提交）。
+    ++- Phase 4（可选）开始前：必须二次确认是否允许 `--force-with-lease`。
+    ++
+    ++## References
+    ++- `scripts/dev-sync-upstream.sh`（默认对齐最新稳定 tag，并自动推断 patch base）。
+    ++- 基线 tag：`rust-v0.92.0`。
+    ++- 当前分支：`feat/agent-reasoning-translation-plugin`。
+28:  302ac354d <  -:  --------- chore(plan): 新增缩差异/降冲突计划与执行合约
+29:  2a1f167dd <  -:  --------- A3: 回退 core 非翻译漂移，缩小差异面
+30:  5212599fc !  4:  7d742e37d A4/A5: 下沉推理翻译编排与测试，瘦身 chatwidget
+    @@ Metadata
+     Author: envy <envy@example.com>
+     
+      ## Commit message ##
+    -    A4/A5: 下沉推理翻译编排与测试，瘦身 chatwidget
+    +    chore(diff): 缩小与上游差异面并下沉推理译文编排/测试
+     
+    -    - 把推理译文的 orchestrator/barrier/deferred/flush 逻辑迁移到新模块
+    -    - chatwidget.rs 保留薄入口与委托，降低热文件冲突面
+    -    - 拆分翻译相关测试到子模块，减少同文件未来冲突
+    -    - 目的：保持关键行为不变，同时显著降低侵入度
+    +    做了什么：回退 core 非翻译漂移；将推理译文编排与测试下沉为独立模块以减轻 chatwidget；回退 footer 到 v0.92 以消除结构性冲突热点，并补充分层说明。
+    +    为什么：减少未来 rebase 冲突面，同时保持推理翻译插件关键行为不回归。
+    +
+    + ## codex-rs/core/Cargo.toml ##
+    +@@ codex-rs/core/Cargo.toml: os_info = { workspace = true }
+    + rand = { workspace = true }
+    + regex = { workspace = true }
+    + regex-lite = { workspace = true }
+    +-reqwest = { workspace = true, features = ["json", "stream", "native-tls-vendored"] }
+    ++reqwest = { workspace = true, features = ["json", "stream"] }
+    + schemars = { workspace = true }
+    + serde = { workspace = true, features = ["derive"] }
+    + serde_json = { workspace = true }
+    +
+    + ## codex-rs/core/src/shell_snapshot.rs ##
+    +@@ codex-rs/core/src/shell_snapshot.rs: mod tests {
+    +         use tokio::time::Instant;
+    +         use tokio::time::sleep;
+    + 
+    +-        fn quote_posix_single(s: &str) -> String {
+    +-            // 最小化的 POSIX 单引号转义：用于把任意路径安全嵌入 `sh -c` 脚本字符串中。
+    +-            // 原理：关闭单引号、插入一个被转义的单引号、再重新打开单引号：
+    +-            //   'foo'"'"'bar'
+    +-            let mut out = String::with_capacity(s.len() + 2);
+    +-            out.push('\'');
+    +-            for ch in s.chars() {
+    +-                if ch == '\'' {
+    +-                    out.push_str("'\"'\"'");
+    +-                } else {
+    +-                    out.push(ch);
+    +-                }
+    +-            }
+    +-            out.push('\'');
+    +-            out
+    +-        }
+    +-
+    +         let dir = tempdir()?;
+    +         let pid_path = dir.path().join("pid");
+    ++        let script = format!("echo $$ > \"{}\"; sleep 30", pid_path.display());
+    + 
+    +         let shell = Shell {
+    +             shell_type: ShellType::Sh,
+    +@@ codex-rs/core/src/shell_snapshot.rs: mod tests {
+    +             shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
+    +         };
+    + 
+    +-        let pid_path_quoted = quote_posix_single(&pid_path.to_string_lossy());
+    +-        let script = format!("echo $$ > {pid_path_quoted}; sleep 30");
+    +         let err = run_script_with_timeout(&shell, &script, Duration::from_secs(1), true)
+    +             .await
+    +             .expect_err("snapshot shell should time out");
+    +
+    + ## codex-rs/core/src/tools/handlers/shell.rs ##
+    +@@ codex-rs/core/src/tools/handlers/shell.rs: mod tests {
+    +         };
+    +         assert_safe(&zsh_shell, "ls -la");
+    + 
+    +-        // PowerShell 的命令安全检查是 Windows 特有的（依赖 PowerShell AST 解析与 Windows 侧白名单）。
+    +-        // 在非 Windows 平台（例如 WSL）中，`powershell.exe` / `pwsh.exe` 可能在 PATH 中存在，
+    +-        // 但对我们的解析/拼参逻辑并不一定稳定一致，因此这里只在 Windows 上做断言。
+    +-        if cfg!(windows) {
+    +-            if let Some(path) = try_find_powershell_executable_blocking() {
+    +-                let powershell = Shell {
+    +-                    shell_type: ShellType::PowerShell,
+    +-                    shell_path: path.to_path_buf(),
+    +-                    shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
+    +-                };
+    +-                assert_safe(&powershell, "ls -Name");
+    +-            }
+    ++        if let Some(path) = try_find_powershell_executable_blocking() {
+    ++            let powershell = Shell {
+    ++                shell_type: ShellType::PowerShell,
+    ++                shell_path: path.to_path_buf(),
+    ++                shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
+    ++            };
+    ++            assert_safe(&powershell, "ls -Name");
+    ++        }
+    + 
+    +-            if let Some(path) = try_find_pwsh_executable_blocking() {
+    +-                let pwsh = Shell {
+    +-                    shell_type: ShellType::PowerShell,
+    +-                    shell_path: path.to_path_buf(),
+    +-                    shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
+    +-                };
+    +-                assert_safe(&pwsh, "ls -Name");
+    +-            }
+    ++        if let Some(path) = try_find_pwsh_executable_blocking() {
+    ++            let pwsh = Shell {
+    ++                shell_type: ShellType::PowerShell,
+    ++                shell_path: path.to_path_buf(),
+    ++                shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
+    ++            };
+    ++            assert_safe(&pwsh, "ls -Name");
+    +         }
+    +     }
+    + 
+    +     fn assert_safe(shell: &Shell, command: &str) {
+    +-        let login_args = shell.derive_exec_args(command, /* use_login_shell */ true);
+    +-        assert!(
+    +-            is_known_safe_command(&login_args),
+    +-            "expected {login_args:?} to be considered safe"
+    +-        );
+    +-
+    +-        let non_login_args = shell.derive_exec_args(command, /* use_login_shell */ false);
+    +-        assert!(
+    +-            is_known_safe_command(&non_login_args),
+    +-            "expected {non_login_args:?} to be considered safe"
+    +-        );
+    ++        assert!(is_known_safe_command(
+    ++            &shell.derive_exec_args(command, /* use_login_shell */ true)
+    ++        ));
+    ++        assert!(is_known_safe_command(
+    ++            &shell.derive_exec_args(command, /* use_login_shell */ false)
+    ++        ));
+    +     }
+    + 
+    +     #[tokio::test]
+    +
+    + ## codex-rs/tui/src/bottom_pane/footer.rs ##
+    +@@
+    + //! Some footer content is time-based rather than event-based, such as the "press again to quit"
+    + //! hint. The owning widgets schedule redraws so time-based hints can expire even if the UI is
+    + //! otherwise idle.
+    +-#[cfg(all(target_os = "linux", not(test)))]
+    ++#[cfg(target_os = "linux")]
+    + use crate::clipboard_paste::is_probably_wsl;
+    + use crate::key_hint;
+    + use crate::key_hint::KeyBinding;
+    +@@ codex-rs/tui/src/bottom_pane/footer.rs: fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
+    +             vec![line]
+    +         }
+    +         FooterMode::ShortcutOverlay => {
+    +-            // 快照测试需要跨环境稳定；测试中禁用 WSL 检测，避免渲染出的快捷键提示依赖 /proc/version。
+    +-            #[cfg(all(target_os = "linux", not(test)))]
+    ++            #[cfg(target_os = "linux")]
+    +             let is_wsl = is_probably_wsl();
+    +-            #[cfg(any(not(target_os = "linux"), test))]
+    ++            #[cfg(not(target_os = "linux"))]
+    +             let is_wsl = false;
+    + 
+    +             let state = ShortcutsState {
+     
+      ## codex-rs/tui/src/chatwidget.rs ##
+     @@ codex-rs/tui/src/chatwidget.rs: use codex_app_server_protocol::AuthMode;
+    @@ codex-rs/tui/src/chatwidget/tests/agent_reasoning_translation.rs (new)
+     +        Some("hello".to_string())
+     +    );
+     +}
+    +
+    + ## codex-rs/tui/src/clipboard_paste.rs ##
+    +@@ codex-rs/tui/src/clipboard_paste.rs: pub fn normalize_pasted_path(pasted: &str) -> Option<PathBuf> {
+    +     None
+    + }
+    + 
+    +-#[cfg(target_os = "linux")]
+    ++#[cfg(all(target_os = "linux", test))]
+    ++pub(crate) fn is_probably_wsl() -> bool {
+    ++    false
+    ++}
+    ++
+    ++#[cfg(all(target_os = "linux", not(test)))]
+    + pub(crate) fn is_probably_wsl() -> bool {
+    +     // Primary: Check /proc/version for "microsoft" or "WSL" (most reliable for standard WSL).
+    +     if let Ok(version) = std::fs::read_to_string("/proc/version") {
+    +
+    + ## issues/2026-01-30_14-10-49-minimize-upstream-diff.csv ##
+    +@@
+    + ID,Title,Description,Acceptance,Test_Method,Tools,Dev_Status,Review1_Status,Regression_Status,Files,Dependencies,Notes
+    +-A1,Baseline：量化差异与冲突探针,在不改代码前先量化当前分支相对 rust-v0.92.0 的差异面，并用 merge-tree 对 rust-v0.93.0-alpha.17 做冲突探针（仅预测趋势，不做真正 rebase）,产出可复核的 baseline 记录（diffstat/numstat/冲突探针输出）并可在后续 Phase 对比,运行并保存以下输出摘要：git diff --stat rust-v0.92.0..HEAD；git diff --numstat rust-v0.92.0..HEAD -- <热文件清单>；git merge-tree --write-tree --messages HEAD rust-v0.93.0-alpha.17 | rg \"^CONFLICT\",git/shell,TODO,TODO,TODO,plan/2026-01-30_14-10-49-minimize-upstream-diff.md;codex-rs/tui/src/chatwidget.rs;codex-rs/tui/src/bottom_pane/footer.rs;codex-rs/core/src/config/mod.rs,none,热文件清单建议与 plan 保持一致；该 issue 只读不改代码
+    +-A2,变更分层清单：必须/可下沉/可移除,按文件+提交归因把当前补丁栈变更分为三类：必须保留（翻译核心链路）、可下沉（迁移到新模块以减少热文件侵入）、可移除（与翻译无关且占用差异预算）,形成一份“分层清单”并明确每项理由与风险；并明确哪些项需要额外用户确认（例如重写历史）,静态审计 git log 与 git diff；必要时用 git show <commit> 辅助归因,git/shell,TODO,TODO,TODO,plan/2026-01-30_14-10-49-minimize-upstream-diff.md, A1,禁止拍脑袋删除；任何“可移除”必须说明与翻译无关的证据
+    +-A3,缩差异：回退/拆分非翻译核心改动（热文件差异预算）,优先处理与翻译无关但会放大 future rebase 冲突的改动：例如 core 依赖 feature 偏离、shell/snapshot 测试稳定性调整、footer.rs 的 WSL 探测相关改动、生成物 schema 的合并策略等,相对 rust-v0.92.0 的热文件 numstat 下降且功能不回归；所有回退/拆分都有明确理由与证据,对候选文件逐项处理并在完成后复跑 A1 的 numstat（只针对热文件）；并在末尾跑一次约束回归（见 A6）,git/shell;cargo/shell,TODO,TODO,TODO,codex-rs/core/Cargo.toml;codex-rs/core/src/shell_snapshot.rs;codex-rs/core/src/tools/handlers/shell.rs;codex-rs/tui/src/bottom_pane/footer.rs;codex-rs/core/config.schema.json,A2,只做“与翻译无关”的最小回退/拆分；不要引入吞错/默认值掩盖失败
+    +-A4,降冲突：抽离翻译编排/状态机出 chatwidget.rs,把推理译文的 orchestrator/barrier/deferred 等复杂状态机迁移到新模块/新文件（例如 chatwidget 子模块），让 chatwidget.rs 保持薄入口与委托调用，从根因减少热文件冲突面,chatwidget.rs 的翻译相关改动行数显著下降且行为不变（译文插入策略/异步不阻塞/request+thread 防串台/超时释放等）,实现迁移后跑 A6 约束回归；必要时补充/调整 codex-tui 的相关单测或快照，确保状态机行为可被自动验证,cargo/shell,TODO,TODO,TODO,codex-rs/tui/src/chatwidget.rs;codex-rs/tui/src/app.rs;codex-rs/tui/src/app_event.rs;codex-rs/tui/src/history_cell.rs,A2,优先“新增文件承载复杂逻辑”；避免无意义重排/格式化导致冲突放大
+    +-A5,降冲突：拆分 chatwidget 翻译相关测试到子模块,把翻译相关的大块测试从 codex-rs/tui/src/chatwidget/tests.rs 下沉到更小的 tests 子模块/文件，降低同文件未来冲突概率并提升可读性,tests.rs 的翻译相关内容迁移完成且 codex-tui 测试通过；测试覆盖 barrier/deferred/插入顺序/失败展示等关键路径,运行 cargo test -p codex-tui（按约束）；若产生快照变更则按仓库惯例审阅并更新,cargo/shell,TODO,TODO,TODO,codex-rs/tui/src/chatwidget/tests.rs,A4,保持测试语义不变；不要为了拆分而删覆盖
+    +-A6,回归：按约束跑 fmt + 4 条命令,在每个阶段性缩差异改动后执行约束回归集合，确保翻译功能与 TUI 不回归,just fmt + 4 条 cargo 命令全部 exit=0,执行：cd codex-rs && just fmt；cargo test -p codex-core translation；cargo test -p codex-exec；cargo build -p codex-cli；cargo test -p codex-tui,cargo/shell,TODO,TODO,TODO,codex-rs,A3;A4;A5,严格遵守“只跑相关测试”；不要跑 cargo test --all-features
+    +-A7,回测：重新量化差异并对比 baseline,完成缩差异改动后重新执行 A1 的量化步骤，对比差异面与冲突探针是否下降或至少不增加,输出对比结论：热文件 numstat 相对 baseline 明显下降；冲突探针项不增加且优先减少 footer.rs 相关冲突,复跑 A1 并把结果与 baseline 对比（至少记录 diffstat/numstat/CONFLICT 列表差异）,git/shell,TODO,TODO,TODO,plan/2026-01-30_14-10-49-minimize-upstream-diff.md,A6,该 issue 不要求“文件数最少”，只关注“热文件侵入度”和“冲突探针项”
+    ++A1,Baseline：量化差异与冲突探针,在不改代码前先量化当前分支相对 rust-v0.92.0 的差异面，并用 merge-tree 对 rust-v0.93.0-alpha.17 做冲突探针（仅预测趋势，不做真正 rebase）,产出可复核的 baseline 记录（diffstat/numstat/冲突探针输出）并可在后续 Phase 对比,"运行并保存以下输出摘要：git diff --stat rust-v0.92.0..HEAD；git diff --numstat rust-v0.92.0..HEAD -- <热文件清单>；git merge-tree --write-tree --messages HEAD rust-v0.93.0-alpha.17 | rg \""^CONFLICT\""",git/shell,DONE,TODO,TODO,plan/2026-01-30_14-10-49-minimize-upstream-diff.md;codex-rs/tui/src/chatwidget.rs;codex-rs/tui/src/bottom_pane/footer.rs;codex-rs/core/src/config/mod.rs,none,"热文件清单建议与 plan 保持一致；该 issue 只读不改代码 | 2026-01-30 14:30:02 UTC+08:00 baseline: diffstat 47 files, +4309/-142; hot numstat: config/mod.rs +141, types.rs +48, footer.rs +4/-3, chatwidget.rs +326/-13, history_cell.rs +125; merge-tree conflicts: codex-rs/Cargo.toml, codex-rs/core/src/lib.rs, codex-rs/tui/src/bottom_pane/footer.rs"
+    ++A2,变更分层清单：必须/可下沉/可移除,按文件+提交归因把当前补丁栈变更分为三类：必须保留（翻译核心链路）、可下沉（迁移到新模块以减少热文件侵入）、可移除（与翻译无关且占用差异预算）,形成一份“分层清单”并明确每项理由与风险；并明确哪些项需要额外用户确认（例如重写历史）,静态审计 git log 与 git diff；必要时用 git show <commit> 辅助归因,git/shell,DONE,TODO,TODO,plan/2026-01-30_14-10-49-minimize-upstream-diff.md, A1,"禁止拍脑袋删除；任何“可移除”必须说明与翻译无关的证据 | 2026-01-30 15:06:34 UTC+08:00 output: plan/2026-01-30_14-10-49-minimize-upstream-diff.A2-change-layering.md; must_keep: core translation+config, exec async, tui insertion; sink: chatwidget state machine/tests, footer props; remove_candidates: shell WSL skip, reqwest native-tls-vendored, shell_snapshot ETXTBSY; confirm_needed: B1 rebase+force-push"
+    ++A3,缩差异：回退/拆分非翻译核心改动（热文件差异预算）,优先处理与翻译无关但会放大 future rebase 冲突的改动：例如 core 依赖 feature 偏离、shell/snapshot 测试稳定性调整、footer.rs 的 WSL 探测相关改动、生成物 schema 的合并策略等,相对 rust-v0.92.0 的热文件 numstat 下降且功能不回归；所有回退/拆分都有明确理由与证据,对候选文件逐项处理并在完成后复跑 A1 的 numstat（只针对热文件）；并在末尾跑一次约束回归（见 A6）,git/shell;cargo/shell,DONE,TODO,TODO,codex-rs/core/Cargo.toml;codex-rs/core/src/shell_snapshot.rs;codex-rs/core/src/tools/handlers/shell.rs;codex-rs/tui/src/bottom_pane/footer.rs;codex-rs/core/config.schema.json,A2,"只做“与翻译无关”的最小回退/拆分；不要引入吞错/默认值掩盖失败 | 2026-01-30 15:21:27 UTC+08:00 done: revert non-translation drift (core/Cargo.toml reqwest feature; core shell.rs test changes; core shell_snapshot.rs test quoting); footer: move WSL detection out of footer.rs via FooterProps.is_wsl + ChatComposer injection (cfg(not(test)) for snapshot stability); local check: cargo test -p codex-tui OK; hot numstat vs rust-v0.92.0 (worktree): footer.rs +15/-8 | 2026-01-30 16:49:32 UTC+08:00 2026-01-30 16:30:58 UTC+08:00 follow-up: reverted footer.rs back to rust-v0.92.0 (drop FooterProps.is_wsl + ChatComposer injection) to eliminate merge-tree footer.rs conflict; keep clipboard_paste.rs cfg(test) is_probably_wsl() -> false for snapshot stability; latest probe conflicts: codex-rs/Cargo.toml, codex-rs/core/src/lib.rs"
+    ++A4,降冲突：抽离翻译编排/状态机出 chatwidget.rs,把推理译文的 orchestrator/barrier/deferred 等复杂状态机迁移到新模块/新文件（例如 chatwidget 子模块），让 chatwidget.rs 保持薄入口与委托调用，从根因减少热文件冲突面,chatwidget.rs 的翻译相关改动行数显著下降且行为不变（译文插入策略/异步不阻塞/request+thread 防串台/超时释放等）,实现迁移后跑 A6 约束回归；必要时补充/调整 codex-tui 的相关单测或快照，确保状态机行为可被自动验证,cargo/shell,DONE,TODO,TODO,codex-rs/tui/src/chatwidget.rs;codex-rs/tui/src/app.rs;codex-rs/tui/src/app_event.rs;codex-rs/tui/src/history_cell.rs,A2,优先“新增文件承载复杂逻辑”；避免无意义重排/格式化导致冲突放大 | 2026-01-30 15:47:55 UTC+08:00 done: extract agent_reasoning translation orchestrator/barrier/deferred into new module (tui/src/chatwidget/agent_reasoning_translation.rs) and keep chatwidget.rs as thin delegation; preserves async spawn + request_id/thread_id checks + deferred flush ordering; hot numstat vs rust-v0.92.0 (worktree): chatwidget.rs +74/-13 (was +326/-13 baseline); local check: cargo test -p codex-tui OK
+    ++A5,降冲突：拆分 chatwidget 翻译相关测试到子模块,把翻译相关的大块测试从 codex-rs/tui/src/chatwidget/tests.rs 下沉到更小的 tests 子模块/文件，降低同文件未来冲突概率并提升可读性,tests.rs 的翻译相关内容迁移完成且 codex-tui 测试通过；测试覆盖 barrier/deferred/插入顺序/失败展示等关键路径,运行 cargo test -p codex-tui（按约束）；若产生快照变更则按仓库惯例审阅并更新,cargo/shell,DONE,TODO,TODO,codex-rs/tui/src/chatwidget/tests.rs,A4,保持测试语义不变；不要为了拆分而删覆盖 | 2026-01-30 15:48:05 UTC+08:00 done: move translation-focused tests out of tui/src/chatwidget/tests.rs into tui/src/chatwidget/tests/agent_reasoning_translation.rs; add minimal test-only helpers in agent_reasoning_translation.rs; local check: cargo test -p codex-tui OK
+    ++A6,回归：按约束跑 fmt + 4 条命令,在每个阶段性缩差异改动后执行约束回归集合，确保翻译功能与 TUI 不回归,just fmt + 4 条 cargo 命令全部 exit=0,执行：cd codex-rs && just fmt；cargo test -p codex-core translation；cargo test -p codex-exec；cargo build -p codex-cli；cargo test -p codex-tui,cargo/shell,DONE,TODO,TODO,codex-rs,A3;A4;A5,严格遵守“只跑相关测试”；不要跑 cargo test --all-features | 2026-01-30 15:55:05 UTC+08:00 regression OK (cd codex-rs): just fmt; cargo test -p codex-core translation; cargo test -p codex-exec; cargo build -p codex-cli; cargo test -p codex-tui
+    ++A7,回测：重新量化差异并对比 baseline,完成缩差异改动后重新执行 A1 的量化步骤，对比差异面与冲突探针是否下降或至少不增加,输出对比结论：热文件 numstat 相对 baseline 明显下降；冲突探针项不增加且优先减少 footer.rs 相关冲突,复跑 A1 并把结果与 baseline 对比（至少记录 diffstat/numstat/CONFLICT 列表差异）,git/shell,DONE,TODO,TODO,plan/2026-01-30_14-10-49-minimize-upstream-diff.md,A6,"该 issue 不要求“文件数最少”，只关注“热文件侵入度”和“冲突探针项” | 2026-01-30 16:28:13 UTC+08:00 2026-01-30 16:28:18 UTC+08:00 A7 done: re-quant vs rust-v0.92.0 (worktree) diffstat 47 files, +4751/-117; hot numstat: chatwidget.rs +75/-13 (baseline +326/-13), footer.rs 0 (baseline +4/-3), config/mod.rs +141, config/types.rs +48, history_cell.rs +125; merge-tree probe vs rust-v0.93.0-alpha.17 conflicts: codex-rs/Cargo.toml, codex-rs/core/src/lib.rs (footer.rs conflict eliminated); regression OK (cd codex-rs): just fmt; cargo test -p codex-core translation; cargo test -p codex-exec; cargo build -p codex-cli; cargo test -p codex-tui"
+    + B1,（可选）补丁栈卫生：squash/reword/reorder 降低未来 rebase 重放冲突,在确认需要时对补丁栈做交互式 rebase（squash/reword/reorder），把翻译功能收敛为少量稳定 commits；该步骤会导致需要 force-with-lease push,在获得二次书面确认后执行；完成后远程分支可正常被拉取且回归仍通过,执行前必须再次确认“允许 --force-with-lease”；执行后复跑 A6；并验证 origin/feat/agent-reasoning-translation-plugin 与本地一致,git/shell,TODO,TODO,TODO,git-history,A7,高风险操作：只在你明确要求“降低未来 rebase 按 commit 重放冲突”时执行
+    +
+    + ## plan/2026-01-30_14-10-49-minimize-upstream-diff.A2-change-layering.md (new) ##
+    +@@
+    ++---
+    ++mode: notes
+    ++related_plan: plan/2026-01-30_14-10-49-minimize-upstream-diff.md
+    ++related_issues_csv: issues/2026-01-30_14-10-49-minimize-upstream-diff.csv
+    ++issue: A2
+    ++created_at: "2026-01-30T14:32:00+08:00"
+    ++---
+    ++
+    ++# A2：变更分层清单（必须/可下沉/可移除）
+    ++
+    ++本文件是对 `rust-v0.92.0..HEAD` 之间补丁栈的静态审计结果，用于后续 A3~A7 做“最小入侵缩差异/降冲突”的决策依据。
+    ++
+    ++## 事实输入（可复核）
+    ++
+    ++- 分支：`feat/agent-reasoning-translation-plugin`
+    ++- 基线 tag：`rust-v0.92.0`
+    ++- 当前 HEAD：`302ac354de440968bb627ed0050047aa1702801d`
+    ++- `rust-v0.92.0..HEAD` 提交数：28
+    ++- A1 baseline 摘要（见 Issue CSV A1 Notes）：
+    ++  - diffstat：47 files changed, +4309/-142
+    ++  - 热文件 numstat：`chatwidget.rs` +326/-13；`footer.rs` +4/-3；`config/mod.rs` +141；`types.rs` +48；`history_cell.rs` +125
+    ++  - 冲突探针（`rust-v0.93.0-alpha.17`）：`codex-rs/Cargo.toml`、`codex-rs/core/src/lib.rs`、`codex-rs/tui/src/bottom_pane/footer.rs`
+    ++
+    ++### 关于“冲突探针”的解释（避免误读）
+    ++
+    ++`git merge-tree HEAD rust-v0.93.0-alpha.17` 的 merge-base 是 `ab99df0694e484f67fcfb8b2765364854f434872`，并非 `rust-v0.92.0`。
+    ++
+    ++因此探针冲突项反映的是“两个不同发布线/分支分叉后”的趋势预测，不等价于“从 `rust-v0.92.0` 快进到 `rust-v0.93.*` 的必然冲突列表”。
+    ++
+    ++## 变更分层
+    ++
+    ++分层目标：
+    ++
+    ++- **必须保留**：删了就会破坏推理翻译插件关键行为（硬约束）。
+    ++- **可下沉**：行为必须保留，但实现可以迁移到新文件/新模块以降低热文件侵入与未来冲突面。
+    ++- **可移除（候选）**：与翻译无关且占用差异预算/制造冲突风险的改动；仅在证据充分时执行回退/拆分（禁止拍脑袋删）。
+    ++
+    ++---
+    ++
+    ++## 必须保留（翻译核心链路）
+    ++
+    ++### Core：外部命令翻译插件 + 配置语义
+    ++
+    ++对应提交：
+    ++
+    ++- `8343a80c8 feat(core): 推理译文外部命令插件`
+    ++- `8c8cec3e9 feat(translation): 增加ui_max_wait_ms并接入TUI`
+    ++- `94b95bf2f fix(core): 翻译配置补齐 JsonSchema 以兼容配置 schema`
+    ++
+    ++涉及文件（关键）：
+    ++
+    ++- `codex-rs/core/src/translation/mod.rs`
+    ++- `codex-rs/core/src/translation/external_command.rs`
+    ++- `codex-rs/core/src/config/mod.rs`
+    ++- `codex-rs/core/src/config/types.rs`
+    ++- `codex-rs/core/src/config/profile.rs`
+    ++- `codex-rs/common/src/config_summary.rs`
+    ++
+    ++保留理由（与硬约束直接相关）：
+    ++
+    ++- 插件默认关闭、未配置不启用（靠 config 语义实现）。
+    ++- `command=[]` 表示显式关闭（profile 覆盖语义不能被“简化”为默认值或吞配置）。
+    ++- 异步执行与任务编排依赖于可被调用的 core translation 能力（哪怕实现是 external command）。
+    ++- `request_id/thread_id` 防串台校验属于业务正确性约束，必须保留在翻译链路上。
+    ++
+    ++风险点（后续改动需特别注意）：
+    ++
+    ++- 配置解析/合并如果做“多路径兜底/默认值静默回退”，会违反“禁止防御性编程掩盖问题”，也会改变 `command=[]` 的语义。
+    ++
+    ++### Exec：推理译文异步输出（不阻塞 UI）
+    ++
+    ++对应提交：
+    ++
+    ++- `cff06418e feat(exec): 推理译文异步输出`
+    ++
+    ++涉及文件（关键）：
+    ++
+    ++- `codex-rs/exec/src/event_processor_with_human_output.rs`
+    ++
+    ++保留理由：
+    ++
+    ++- TUI 主循环不能被翻译阻塞；exec 层异步输出是“不阻塞”的基础设施之一。
+    ++
+    ++### TUI：译文紧贴原文体验（barrier/deferred/flush）
+    ++
+    ++对应提交：
+    ++
+    ++- `43c389d5b feat(tui): 推理译文紧贴展示（含 tui2）`
+    ++- `089995809 fix(tui): 成功译文不再显示└ 译文标签`
+    ++- `8261ea375 fix(tui,tui2): 推理译文块避免二次换行导致挤压`
+    ++- `67e05aea7 fix(tui): 补齐推理翻译字段初始化（修复编译）`
+    ++
+    ++涉及文件（关键）：
+    ++
+    ++- `codex-rs/tui/src/chatwidget.rs`
+    ++- `codex-rs/tui/src/history_cell.rs`
+    ++- `codex-rs/tui/src/app.rs`
+    ++- `codex-rs/tui/src/app_event.rs`
+    ++
+    ++保留理由：
+    ++
+    ++- “译文紧贴原文”的体验依赖 barrier/deferred 机制（顺序、超时释放、flush 逻辑）。此处任何重构都必须“行为等价”。
+    ++- request/thread 防串台校验与 UI 插入策略耦合，删改会造成“把别的请求译文贴到当前会话”的严重回归。
+    ++
+    ++### 自动验证（翻译链路的回归锚点）
+    ++
+    ++对应提交：
+    ++
+    ++- `43c389d5b` / `089995809` / `8c8cec3e9` 等对测试的增补
+    ++
+    ++涉及文件（关键）：
+    ++
+    ++- `codex-rs/tui/src/chatwidget/tests.rs`
+    ++
+    ++保留理由：
+    ++
+    ++- 后续 A4/A5 会移动实现位置；测试是“保持行为不回归”的唯一可自动化证据载体之一。
+    ++
+    ++---
+    ++
+    ++## 可下沉（保留行为，降低热文件侵入/未来冲突）
+    ++
+    ++### 1) `codex-rs/tui/src/chatwidget.rs`：翻译编排/状态机下沉
+    ++
+    ++现状证据：
+    ++
+    ++- A1 热文件 numstat：`chatwidget.rs` +326/-13（侵入度最高）
+    ++- 相关提交：`43c389d5b`、`8c8cec3e9`、`67e05aea7`
+    ++
+    ++建议下沉方向（与 plan A4 对齐）：
+    ++
+    ++- 新增 chatwidget 子模块承载 orchestrator + barrier/deferred 状态机；`chatwidget.rs` 仅保留薄入口/委托/事件转发。
+    ++- 若需要解耦 UI：用 “effects 列表” 作为输出（例如 AppendCell/SpawnTask/FlushDeferred），避免状态机直接操作 UI 数据结构。
+    ++
+    ++下沉的收益：
+    ++
+    ++- 减少对上游热文件的长期侵入，降低未来 rebase/合并时的冲突概率。
+    ++
+    ++### 2) `codex-rs/tui/src/chatwidget/tests.rs`：翻译相关测试下沉
+    ++
+    ++现状证据：
+    ++
+    ++- diffstat：`chatwidget/tests.rs` +356（同样是高冲突面）
+    ++
+    ++建议：
+    ++
+    ++- 把翻译相关大块测试拆到更小的 tests 子模块/文件（A5），降低同文件冲突概率，并便于聚焦 barrier/deferred 行为回归。
+    ++
+    ++### 3) `codex-rs/tui/src/bottom_pane/footer.rs`：向“props 注入 + 纯渲染”靠拢
+    ++
+    ++现状证据：
+    ++
+    ++- 冲突探针命中：`codex-rs/tui/src/bottom_pane/footer.rs`
+    ++- 当前 footer 内包含 WSL 检测的 cfg/test 分支（为快照测试稳定性做的妥协）
+    ++
+    ++建议：
+    ++
+    ++- 逐步把 `is_wsl` 的判定从 footer 内移到更上层（owner widget/app），footer 接收 props 并纯渲染。
+    ++- 这样既能保留“测试稳定性”，也能避免 footer 在上游结构调整时反复冲突（根因治理）。
+    ++
+    ++---
+    ++
+    ++## 可移除（候选，需要证据与回归；禁止拍脑袋删）
+    ++
+    ++### 1) WSL 下跳过 PowerShell 安全断言（疑似与翻译无关）
+    ++
+    ++对应提交：
+    ++
+    ++- `249c5e318 test(core): WSL 下跳过 PowerShell 安全断言`
+    ++
+    ++涉及文件：
+    ++
+    ++- `codex-rs/core/src/tools/handlers/shell.rs`
+    ++
+    ++初步判断：
+    ++
+    ++- 从提交信息与文件归属看，是 shell 工具/测试稳定性相关；与翻译核心链路无直接关系。
+    ++
+    ++后续决策所需证据（A3 再执行）：
+    ++
+    ++- 该改动是否只是测试规避（例如 WSL 环境差异），以及是否会影响计划允许的测试集合。
+    ++
+    ++### 2) `reqwest` 启用 `native-tls-vendored`（依赖 feature 偏离）
+    ++
+    ++对应提交：
+    ++
+    ++- `7193629ae chore(core): reqwest 启用 native-tls-vendored`
+    ++
+    ++涉及文件：
+    ++
+    ++- `codex-rs/core/Cargo.toml`
+    ++
+    ++初步判断：
+    ++
+    ++- 与翻译核心链路（external command）无直接关系，但可能是为构建环境可移植性（OpenSSL 依赖）做的工程化调整。
+    ++
+    ++后续决策所需证据（A3 再执行）：
+    ++
+    ++- 在目标环境（WSL2）与允许的回归命令下，此 feature 是否必要；若非必要可回退以缩差异面。
+    ++
+    ++### 3) shell_snapshot 超时/ETXTBSY 相关修复（测试稳定性噪声）
+    ++
+    ++对应提交：
+    ++
+    ++- `f19178566 fix(core): 更新配置 schema 并修复 shell_snapshot 超时测试（避免 Linux ETXTBSY）`
+    ++- `286125a06 chore: 更新 Cargo.lock 与格式（对齐 v0.92.0）`（包含对 `shell_snapshot.rs` 的再修改）
+    ++
+    ++涉及文件：
+    ++
+    ++- `codex-rs/core/src/shell_snapshot.rs`
+    ++- `codex-rs/core/config.schema.json`（生成物）
+    ++
+    ++初步判断：
+    ++
+    ++- 与翻译核心链路无直接关系，属于测试稳定性/生成物同步类噪声，可能占用差异预算。
+    ++
+    ++后续决策所需证据（A3 再执行）：
+    ++
+    ++- 是否能在不影响允许回归集合的前提下回退；以及生成物是否可以通过流程重建而非长期保留手工合并结果。
+    ++
+    ++---
+    ++
+    ++## 需要用户二次确认的事项
+    ++
+    ++- B1：补丁栈卫生（interactive rebase + `--force-with-lease` push）是高风险操作，未获得明确书面确认前不得执行。
+    ++
+    ++## 下一步（A3 聚焦点）
+    ++
+    ++优先处理“与翻译无关但占用差异预算/制造冲突根因”的改动点：
+    ++
+    ++1. footer：推进 props 注入/纯渲染，优先消除探针冲突根因。
+    ++2. 依赖 feature 偏离（`reqwest native-tls-vendored`）：评估必要性后决定回退/保留。
+    ++3. shell_snapshot / shell handler：识别与翻译无关的测试稳定性改动，能拆则拆、能退则退。
+    ++
+31:  de312037b <  -:  --------- A3: footer 回退到 v0.92，消除结构性冲突热点
+32:  a51c12d99 <  -:  --------- docs: 记录变更分层与 A7 量化结论
+33:  786984f92 <  -:  --------- P2: 对齐 workspace.package.version 以消除 probe 冲突
+34:  5dcac73bd <  -:  --------- P3: 调整 core/src/lib.rs 模块声明落点以消除 probe 冲突
+35:  b7b4e4068 <  -:  --------- chore(fmt): 接受 rustfmt 对 lib.rs 声明顺序调整
+36:  e60c24004 !  5:  2341ec501 fix(tui): 固定 TUI 显示版本为 v0.92.0（与快照一致）
+    @@ Metadata
+     Author: envy <envy@example.com>
+     
+      ## Commit message ##
+    -    fix(tui): 固定 TUI 显示版本为 v0.92.0（与快照一致）
+    +    chore(conflict): 消除 probe 冲突热点并稳定快照
+     
+    -    原因：为消除 merge-tree probe 在 codex-rs/Cargo.toml 的版本行冲突，我们将 workspace.package.version 对齐为 0.0.0；这会连带让 codex-tui 的 CARGO_PKG_VERSION 变为 0.0.0，导致 status 快照测试失败。将 codex-tui crate 版本显式钉到 0.92.0，使 UI 版本展示与既有快照/用户预期保持一致。
+    +    做了什么：对齐 workspace.package.version（开发态=0.0.0），调整 core/src/lib.rs 模块声明落点并接受 rustfmt 顺序；固定 codex-tui crate 版本为 0.92.0 以保持快照一致。
+    +    为什么：降低与上游 tag 的三方冲突概率，并避免版本号漂移引发的 snapshot 噪音。
+     
+      ## codex-rs/Cargo.lock ##
+     @@ codex-rs/Cargo.lock: checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
+    @@ codex-rs/Cargo.lock: dependencies = [
+       "anyhow",
+       "codex-core",
+     
+    + ## codex-rs/Cargo.toml ##
+    +@@ codex-rs/Cargo.toml: members = [
+    + resolver = "2"
+    + 
+    + [workspace.package]
+    +-version = "0.92.0"
+    ++version = "0.0.0"
+    + # Track the edition for all workspace crates in one place. Individual
+    + # crates can still override this value, but keeping it here means new
+    + # crates created with `cargo new -w ...` automatically inherit the 2024
+    +
+    + ## codex-rs/core/src/lib.rs ##
+    +@@ codex-rs/core/src/lib.rs: pub mod landlock;
+    + pub mod mcp;
+    + mod mcp_connection_manager;
+    + pub mod models_manager;
+    +-pub mod translation;
+    + pub use mcp_connection_manager::MCP_SANDBOX_STATE_CAPABILITY;
+    + pub use mcp_connection_manager::MCP_SANDBOX_STATE_METHOD;
+    + pub use mcp_connection_manager::SandboxState;
+    +@@ codex-rs/core/src/lib.rs: mod event_mapping;
+    + pub mod review_format;
+    + pub mod review_prompts;
+    + mod thread_manager;
+    ++pub mod translation;
+    + pub mod web_search;
+    + pub use codex_protocol::protocol::InitialHistory;
+    + pub use thread_manager::NewThread;
+    +
+      ## codex-rs/tui/Cargo.toml ##
+     @@
+      [package]
+37:  b7940b686 !  6:  aff96fc3a chore(plan): 添加 17-45 执行合约并记录 Plan A 结果
+    @@ Metadata
+     Author: envy <envy@example.com>
+     
+      ## Commit message ##
+    -    chore(plan): 添加 17-45 执行合约并记录 Plan A 结果
+    +    chore(dev): dev-sync-upstream 构建期临时注入 tag 版本号
+     
+    -    原因：把 Plan/Issues CSV 纳入版本控制，固化 probe 基线、冲突消除证据与白名单回归结果，便于后续 rebase/协作审计；Plan B（B1 改历史）按当前决定暂缓，仅记录门禁状态。
+    +    做了什么：在选择 rust-v* tag 且启用 build/verify 时，临时写入 workspace 版本并自动恢复（含 Cargo.lock），并记录 B1 门禁执行证据。
+    +    为什么：保证产物版本与上游 tag 一致，同时避免把版本号改动带进补丁栈，降低后续重放冲突。
+     
+      ## issues/2026-01-30_17-45-21-b1-patchstack-hygiene.csv (new) ##
+     @@
+     +ID,Title,Description,Acceptance,Test_Method,Tools,Dev_Status,Review1_Status,Regression_Status,Files,Dependencies,Notes
+    -+H1,B1 门禁：冻结窗口确认 + 备份 refs 推送,在开始改历史前完成协作风险控制：确认无人基于远端分支开发（冻结窗口）；创建并推送 backup refs（tag/backup 分支）到 origin；记录关键 SHAs,备份 refs 在 origin 可见且可用于一键回滚；Notes 记录：冻结确认方式 + backup ref 名称 + SHA + 远端分支 SHA（lease 基准）,执行并记录：git rev-parse HEAD origin/feat/agent-reasoning-translation-plugin；创建 tag/backup 分支并 git push origin；记录输出,git/shell,TODO,TODO,TODO,plan/2026-01-30_17-45-21-b1-patchstack-hygiene.md,none,本 issue 必须获取明确书面确认后才能继续执行 rebase/force-with-lease；若无法确认冻结，默认改为推新分支而非 force 覆盖旧分支 | 2026-01-30 18:23:22 UTC+08:00 H1 准备中：已完成 Plan A，进入 B1 门禁阶段；需要协作者“冻结窗口”书面确认后才会继续执行任何改历史（rebase/amend/force-with-lease）。 | 2026-01-30 19:20:46 UTC+08:00 用户决定暂不执行 B1（改历史）计划；停止在 H1 门禁阶段，不创建/推送 backup refs，不进行 rebase/force-with-lease。
+    ++H1,B1 门禁：冻结窗口确认 + 备份 refs 推送,在开始改历史前完成协作风险控制：确认无人基于远端分支开发（冻结窗口）；创建并推送 backup refs（tag/backup 分支）到 origin；记录关键 SHAs,备份 refs 在 origin 可见且可用于一键回滚；Notes 记录：冻结确认方式 + backup ref 名称 + SHA + 远端分支 SHA（lease 基准）,执行并记录：git rev-parse HEAD origin/feat/agent-reasoning-translation-plugin；创建 tag/backup 分支并 git push origin；记录输出,git/shell,DONE,TODO,TODO,plan/2026-01-30_17-45-21-b1-patchstack-hygiene.md,none,本 issue 必须获取明确书面确认后才能继续执行 rebase/force-with-lease；若无法确认冻结，默认改为推新分支而非 force 覆盖旧分支 | 2026-01-30 18:23:22 UTC+08:00 H1 准备中：已完成 Plan A，进入 B1 门禁阶段；需要协作者“冻结窗口”书面确认后才会继续执行任何改历史（rebase/amend/force-with-lease）。 | 2026-01-30 19:20:46 UTC+08:00 用户决定暂不执行 B1（改历史）计划；停止在 H1 门禁阶段，不创建/推送 backup refs，不进行 rebase/force-with-lease。 | 2026-01-30 20:35:25 UTC+08:00 2026-01-30 20:07:36 UTC+08:00 H1 完成门禁（单人开发=已确认冻结窗口立即生效）。记录：OLD_HEAD=1441d05b025c；ORIGIN_BRANCH_SHA(lease基准)=302ac354de44。已创建并推送备份 refs 到 origin：tag=backup-b1-pre-20260130-1441d05b025c（tag obj=e8ccfd5e143e -> commit 1441d05b025c），branch=backup/b1-pre-20260130-1441d05b025c。B1 前白名单回归（均 exit=0）：cd codex-rs && just fmt；cargo test -p codex-core translation；cargo test -p codex-exec；cargo build -p codex-cli；cargo test -p codex-tui。回滚点：git reset --hard backup-b1-pre-20260130-1441d05b025c
+     +H2,B1：交互式 rebase 收敛补丁栈,对翻译插件相关提交做 squash/reword/reorder，收敛为少量主题 commits；原则上不改内容,交互式 rebase 完成且工作区干净；提交信息为中文且包含“做了什么+为什么”；未丢失功能,执行：git rebase -i <base>；解决冲突并继续；完成后记录新 HEAD SHA,git/shell,TODO,TODO,TODO,git history,H1,仅整理历史不做内容修复；若出现内容变更必须停下并解释原因
+     +H3,B1 后门禁：range-diff/tree diff + 白名单回归,证明“只改历史不改内容”（或明确记录必要内容变更）；并再次跑白名单回归集合,range-diff 审计通过；若承诺内容不变则 tree diff 为空；白名单 5 条命令全部 exit=0,执行：git range-diff <old_range> <new_range>（或等价）；git diff <old_sha>..<new_sha>（如适用）；然后跑白名单 5 条命令,git/shell;cargo/shell,TODO,TODO,TODO,codex-rs;git history,H2,任何门禁失败立即回滚到 backup ref；记录证据优先于继续推进
+     +H4,推送：force-with-lease 或新分支方案,满足准入条件后推送；若冻结/准入不满足则推送到新分支并通知协作者切换,force 路径：push 成功且 lease 校验未失败；或新分支路径：push 成功且 Notes 记录新分支名/切换指引,执行：git push --force-with-lease origin feat/agent-reasoning-translation-plugin（仅当满足准入条件）；否则 git push origin HEAD:refs/heads/feat/agent-reasoning-translation-plugin-v2,git/shell,TODO,TODO,TODO,origin branch,H3,force-with-lease 准入条件：冻结确认+backup refs 已推送+H3 门禁通过；否则禁止 force
+    @@ plan/2026-01-30_17-45-21-reduce-probe-conflicts.md (new)
+     +- Plan 审计（Claude opus）：SESSION_ID=dac7da61-8f93-450e-aab7-91df4cff2a73
+     +- Plan 审计（Gemini）：SESSION_ID=5979ec14-3e9f-4260-94a6-673f66f4a0b2
+     +- Plan 审计（spawn_agent）：id=019c0e47-82a4-7130-a9ef-03b404d8cd44
+    +
+    + ## scripts/dev-sync-upstream.sh ##
+    +@@ scripts/dev-sync-upstream.sh: usage() {
+    +   2) git rebase --onto <latest stable rust tag> <patch-base>
+    +   3) 可选：push / build / link / verify（交互询问）
+    + 
+    ++  说明（版本对齐）：
+    ++  - 当 upstream 选择的是 rust-v* tag 且启用了 build/verify 时，
+    ++    脚本会临时把 codex-rs/Cargo.toml 的 workspace.package.version 写成该 tag 的版本号，
+    ++    并备份/恢复 codex-rs/Cargo.lock，确保 `codex --version` 对应该 tag。
+    ++  - 脚本退出会自动恢复上述文件，不把 version 变化带进补丁栈（保持 git 干净）。
+    ++
+    + 常用示例：
+    +   # 交互式：默认对齐“最新稳定 tag”，并提示你选择是否编译/建链接/推送
+    +   ./scripts/dev-sync-upstream.sh
+    +@@ scripts/dev-sync-upstream.sh: run_git() {
+    +   run_cmd git -C "$REPO_ROOT" "$@"
+    + }
+    + 
+    ++VERSION_OVERRIDE_DIR=""
+    ++VERSION_OVERRIDE_APPLIED=0
+    ++
+    ++restore_workspace_version_override() {
+    ++  if [[ "${VERSION_OVERRIDE_APPLIED}" -ne 1 ]]; then
+    ++    return 0
+    ++  fi
+    ++
+    ++  if [[ -z "${VERSION_OVERRIDE_DIR}" || ! -d "${VERSION_OVERRIDE_DIR}" ]]; then
+    ++    warn "未找到版本备份目录（VERSION_OVERRIDE_DIR=${VERSION_OVERRIDE_DIR}），跳过恢复。"
+    ++    return 0
+    ++  fi
+    ++
+    ++  local cargo_toml="${CODEX_RS_DIR}/Cargo.toml"
+    ++  local cargo_lock="${CODEX_RS_DIR}/Cargo.lock"
+    ++
+    ++  info "恢复 workspace 版本文件（Cargo.toml/Cargo.lock）..."
+    ++  if [[ -f "${VERSION_OVERRIDE_DIR}/Cargo.toml" ]]; then
+    ++    run_cmd cp "${VERSION_OVERRIDE_DIR}/Cargo.toml" "$cargo_toml"
+    ++  fi
+    ++  if [[ -f "${VERSION_OVERRIDE_DIR}/Cargo.lock" ]]; then
+    ++    run_cmd cp "${VERSION_OVERRIDE_DIR}/Cargo.lock" "$cargo_lock"
+    ++  fi
+    ++
+    ++  if [[ "${DRY_RUN}" -ne 1 ]]; then
+    ++    run_cmd rm -rf "${VERSION_OVERRIDE_DIR}"
+    ++  fi
+    ++
+    ++  VERSION_OVERRIDE_DIR=""
+    ++  VERSION_OVERRIDE_APPLIED=0
+    ++}
+    ++
+    ++should_override_workspace_version() {
+    ++  # 仅当：
+    ++  # - 上游 ref 是 rust-v* tag（因此 UPSTREAM_VERSION 非空）
+    ++  # - 且本次确实会 build/verify（否则没必要改写）
+    ++  if [[ -z "${UPSTREAM_VERSION}" ]]; then
+    ++    return 1
+    ++  fi
+    ++  if [[ "${BUILD_MODE}" == "none" && "${VERIFY_MODE}" == "none" ]]; then
+    ++    return 1
+    ++  fi
+    ++  return 0
+    ++}
+    ++
+    ++apply_workspace_version_override() {
+    ++  if ! should_override_workspace_version; then
+    ++    return 0
+    ++  fi
+    ++
+    ++  # 交互/非交互都一致：仅影响本次 build/verify 的产物版本号；
+    ++  # 脚本退出时自动恢复，避免把 “version 变化” 带进补丁栈。
+    ++  local cargo_toml="${CODEX_RS_DIR}/Cargo.toml"
+    ++  local cargo_lock="${CODEX_RS_DIR}/Cargo.lock"
+    ++
+    ++  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    ++    info "dry-run：将临时写入 workspace version=${UPSTREAM_VERSION} 到 ${cargo_toml}（并在脚本退出时恢复）"
+    ++    return 0
+    ++  fi
+    ++
+    ++  VERSION_OVERRIDE_DIR="$(mktemp -d)"
+    ++  VERSION_OVERRIDE_APPLIED=1
+    ++  trap restore_workspace_version_override EXIT
+    ++
+    ++  run_cmd cp "$cargo_toml" "${VERSION_OVERRIDE_DIR}/Cargo.toml"
+    ++  if [[ -f "$cargo_lock" ]]; then
+    ++    run_cmd cp "$cargo_lock" "${VERSION_OVERRIDE_DIR}/Cargo.lock"
+    ++  fi
+    ++
+    ++  info "临时写入 workspace version=${UPSTREAM_VERSION}（仅用于本次 build/verify；脚本退出自动恢复）"
+    ++  run_cmd python3 - "$cargo_toml" "$UPSTREAM_VERSION" <<'PY'
+    ++import re
+    ++import sys
+    ++from pathlib import Path
+    ++
+    ++cargo_toml_path = Path(sys.argv[1])
+    ++new_version = sys.argv[2]
+    ++
+    ++raw = cargo_toml_path.read_text(encoding="utf-8")
+    ++lines = raw.splitlines(keepends=True)
+    ++
+    ++in_workspace_package = False
+    ++replaced = False
+    ++out = []
+    ++
+    ++for line in lines:
+    ++    if re.match(r"^\[.*\]\s*$", line):
+    ++        in_workspace_package = line.strip() == "[workspace.package]"
+    ++        out.append(line)
+    ++        continue
+    ++
+    ++    if in_workspace_package and not replaced:
+    ++        match = re.match(r'^version\s*=\s*"[^"]*"\s*(#.*)?\n?$', line)
+    ++        if match:
+    ++            suffix = match.group(1) or ""
+    ++            newline = "\n" if line.endswith("\n") else ""
+    ++            out.append(f'version = "{new_version}"{suffix}{newline}')
+    ++            replaced = True
+    ++            continue
+    ++
+    ++    out.append(line)
+    ++
+    ++if not replaced:
+    ++    raise SystemExit("failed to update [workspace.package] version in Cargo.toml")
+    ++
+    ++cargo_toml_path.write_text("".join(out), encoding="utf-8")
+    ++PY
+    ++}
+    ++
+    + prompt_yes_no() {
+    +   local question="$1"
+    +   local default="$2" # y 或 n
+    +@@ scripts/dev-sync-upstream.sh: if [[ "$DO_PUSH" -eq 1 ]]; then
+    +   run_git push --force-with-lease origin "$CURRENT_BRANCH"
+    + fi
+    + 
+    ++# ===== 执行：临时版本对齐（仅影响 build/verify 产物）=====
+    ++#
+    ++# 目标：让编译出的二进制（`codex --version`）与上游 rust-v* tag 一致，
+    ++# 但不把 version 变化带进补丁栈（脚本退出自动恢复）。
+    ++apply_workspace_version_override
+    ++
+    + # ===== 执行：build =====
+    + 
+    + build_debug() {
+38:  1441d05b0 <  -:  --------- chore(scripts): dev-sync-upstream 临时注入 tag 版本号用于构建
+39:  3cd0af54d <  -:  --------- docs(issue): 记录 B1 H1 门禁（备份 refs 与白名单回归）
