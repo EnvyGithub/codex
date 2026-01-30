@@ -107,7 +107,8 @@ cargo test -p codex-tui
 - 测试白名单限制：无法扩大验证范围，存在漏检风险；B1 只能降低冲突风险，不等于零风险。
 
 ## Rollback / Recovery
-- 通过 backup ref 一键回滚（写入 issue Notes，作为执行门禁的一部分）：
+- 通过 backup ref 一键回滚（写入 issue Notes，作为执行门禁的一部分）。
+- 完整 SOP（含协作者同步/远端回滚注意事项）：@docs/b1-rollback.md
 
 ```bash
 cd "/home/admin2/tmp/openai-codex"
