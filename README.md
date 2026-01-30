@@ -41,9 +41,20 @@ Each GitHub Release contains many executables, but in practice, you likely want 
 
 Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
 
+```toml
+[plugins.translation.agent_reasoning]
+command = ["python3", "/path/to/translate_agent_reasoning_dummy.py"]
+timeout_ms = 2000
+ui_max_wait_ms = 5000
+```
+
 </details>
 
 ### Using Codex with your ChatGPT plan
+
+> 兼容说明：旧路径 `[translation.agent_reasoning]` 仍可用但已弃用（启动会 warning）；同一作用域新旧配置不能共存（会直接报错并提示迁移）。
+
+详细说明见：`docs/translation.md`。
 
 Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Team, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
 

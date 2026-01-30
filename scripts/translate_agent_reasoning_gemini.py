@@ -11,7 +11,7 @@ Google Gemini 翻译器示例（用于 Codex “推理输出翻译插件”）�
 
 使用方式（示例）：
 
-  [translation.agent_reasoning]
+  [plugins.translation.agent_reasoning]
   command = ["python3", "/path/to/translate_agent_reasoning_gemini.py"]
   timeout_ms = 8000
   ui_max_wait_ms = 5000
@@ -302,9 +302,9 @@ def main() -> int:
 
     if translated is None:
         sys.stderr.write(f"translation_failed:{last_err}\n")
-        sys.stderr.write(
-            "hint: try increasing CODEX_GEMINI_MAX_OUTPUT_TOKENS and/or translation.agent_reasoning.timeout_ms\n"
-        )
+            sys.stderr.write(
+            "hint: try increasing CODEX_GEMINI_MAX_OUTPUT_TOKENS and/or plugins.translation.agent_reasoning.timeout_ms\n"
+            )
         return 2
 
     resp = {"schema_version": 1, "text": translated}

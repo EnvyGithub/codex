@@ -14,7 +14,7 @@
 在配置文件中加入：
 
 ```toml
-[translation.agent_reasoning]
+[plugins.translation.agent_reasoning]
 # 外部翻译器命令（argv）。示例：python 脚本
 command = ["python3", "/path/to/translate_agent_reasoning.py"]
 
@@ -26,14 +26,40 @@ timeout_ms = 2000
 ui_max_wait_ms = 5000
 ```
 
+### 旧配置兼容（deprecated）与迁移
+
+本插件已切换为“插件自解析”配置路径：
+
+- 推荐新路径：`[plugins.translation.agent_reasoning]`
+- 旧路径仍兼容但已弃用：`[translation.agent_reasoning]`
+
+兼容策略（强消歧，避免隐式优先级）：
+
+- **同一作用域**（global 或某个 profile）新旧配置同时存在：**直接报错**并提示迁移；
+- 仅存在旧路径：功能仍生效，但会输出一次 warning（提示迁移到新路径）。
+
+> 说明：“同一作用域”指同一层级：要么是全局（root），要么是同一个 profile（例如 `profiles.dev`）。
+> 全局与 profile 属于不同作用域：允许出现“全局新路径 + profile 旧路径”的混用（profile 会覆盖全局；旧路径仍会触发弃用 warning）。
+
+示例（禁止共存）：
+
+```toml
+# ❌ 不要这样写：同一作用域新旧共存会报错
+[plugins.translation.agent_reasoning]
+command = ["python3", "/path/to/translate_agent_reasoning.py"]
+
+[translation.agent_reasoning]
+command = ["python3", "/path/to/translate_agent_reasoning.py"]
+```
+
 ### 配合 profiles 使用
 
 ```toml
-[translation.agent_reasoning]
+[plugins.translation.agent_reasoning]
 command = ["python3", "/path/to/translate_agent_reasoning.py"]
 timeout_ms = 2000
 
-[profiles.no_translate.translation.agent_reasoning]
+[profiles.no_translate.plugins.translation.agent_reasoning]
 # 空数组表示“显式关闭”（用于覆盖全局配置）
 command = []
 ```
@@ -49,15 +75,15 @@ command = []
     - 翻译在后台执行；
     - 译文不再额外展示 `└ 译文` 这类“标签行”，而是把译文正文直接作为子节点输出（第一行带 `└`）；
     - 为了保证**译文紧跟原文**，TUI/TUI2 会在译文生成完成（或超时）前，**短暂缓冲后续的历史输出**，避免其它块插入导致错位。
-    - 默认最多等待 5 秒；可在 `config.toml` 中设置 `translation.agent_reasoning.ui_max_wait_ms` 覆盖；
+    - 默认最多等待 5 秒；可在 `config.toml` 中设置 `plugins.translation.agent_reasoning.ui_max_wait_ms` 覆盖；
       也可用环境变量覆盖（单位：毫秒；优先级更高）：
       - `CODEX_TUI_AGENT_REASONING_TRANSLATION_MAX_WAIT_MS=5000`
     - 超时后：会输出 `译文生成失败：等待超时...`，然后立刻放行并输出缓冲内容；晚到的译文将被丢弃（避免破坏“紧跟原文”的阅读顺序）。
-    - 注意：`ui_max_wait_ms` 只是 UI 侧“对齐等待上限”，与 `translation.agent_reasoning.timeout_ms`（外部命令执行超时）是两回事；出网翻译建议把 `timeout_ms` 设得**不小于** `ui_max_wait_ms`，避免 UI 先放行但翻译器还在跑。
+    - 注意：`ui_max_wait_ms` 只是 UI 侧“对齐等待上限”，与 `plugins.translation.agent_reasoning.timeout_ms`（外部命令执行超时）是两回事；出网翻译建议把 `timeout_ms` 设得**不小于** `ui_max_wait_ms`，避免 UI 先放行但翻译器还在跑。
 - **codex exec（human output）**
   - 在输出推理原文后，后台翻译完成会打印一段 `译文`（不阻塞主事件处理；尽力在退出前输出已完成结果）。
 
-> 注意：未配置 `translation.agent_reasoning.command` 时，行为与上游保持一致（完全不翻译、不改变输出）。
+> 注意：未配置 `plugins.translation.agent_reasoning.command`（或 legacy 的 `translation.agent_reasoning.command`）时，行为与上游保持一致（完全不翻译、不改变输出）。
 
 ## 外部翻译器协议（stdin / stdout JSON）
 
@@ -172,7 +198,7 @@ CODEX_GEMINI_MAX_OUTPUT_TOKENS=4096
 
 同样建议把 `timeout_ms` 设得稍大一些（例如 8000ms 或 15000ms），因为出网翻译的延迟往往不稳定。
 
-> 备注：在部分 Gemini 代理/网关中，中文输出的 token 计数可能偏“紧”。如果你发现译文被截断（例如结尾突然断句），请把 `CODEX_GEMINI_MAX_OUTPUT_TOKENS` 调大（并同步增大 `translation.agent_reasoning.timeout_ms`）。
+> 备注：在部分 Gemini 代理/网关中，中文输出的 token 计数可能偏“紧”。如果你发现译文被截断（例如结尾突然断句），请把 `CODEX_GEMINI_MAX_OUTPUT_TOKENS` 调大（并同步增大 `plugins.translation.agent_reasoning.timeout_ms`）。
 
 ### 使用自建/代理 Gemini 网关（示例：crs1）
 

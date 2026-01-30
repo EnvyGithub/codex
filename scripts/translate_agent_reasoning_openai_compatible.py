@@ -11,7 +11,7 @@ OpenAI 兼容翻译器示例（用于 Codex “推理输出翻译插件”）。
 
 使用方式（示例）：
 
-  [translation.agent_reasoning]
+  [plugins.translation.agent_reasoning]
   command = ["python3", "/path/to/translate_agent_reasoning_openai_compatible.py"]
   timeout_ms = 8000
   ui_max_wait_ms = 5000
