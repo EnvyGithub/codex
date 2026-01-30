@@ -375,42 +375,32 @@ mod tests {
         };
         assert_safe(&zsh_shell, "ls -la");
 
-        // PowerShell 的命令安全检查是 Windows 特有的（依赖 PowerShell AST 解析与 Windows 侧白名单）。
-        // 在非 Windows 平台（例如 WSL）中，`powershell.exe` / `pwsh.exe` 可能在 PATH 中存在，
-        // 但对我们的解析/拼参逻辑并不一定稳定一致，因此这里只在 Windows 上做断言。
-        if cfg!(windows) {
-            if let Some(path) = try_find_powershell_executable_blocking() {
-                let powershell = Shell {
-                    shell_type: ShellType::PowerShell,
-                    shell_path: path.to_path_buf(),
-                    shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
-                };
-                assert_safe(&powershell, "ls -Name");
-            }
+        if let Some(path) = try_find_powershell_executable_blocking() {
+            let powershell = Shell {
+                shell_type: ShellType::PowerShell,
+                shell_path: path.to_path_buf(),
+                shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
+            };
+            assert_safe(&powershell, "ls -Name");
+        }
 
-            if let Some(path) = try_find_pwsh_executable_blocking() {
-                let pwsh = Shell {
-                    shell_type: ShellType::PowerShell,
-                    shell_path: path.to_path_buf(),
-                    shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
-                };
-                assert_safe(&pwsh, "ls -Name");
-            }
+        if let Some(path) = try_find_pwsh_executable_blocking() {
+            let pwsh = Shell {
+                shell_type: ShellType::PowerShell,
+                shell_path: path.to_path_buf(),
+                shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
+            };
+            assert_safe(&pwsh, "ls -Name");
         }
     }
 
     fn assert_safe(shell: &Shell, command: &str) {
-        let login_args = shell.derive_exec_args(command, /* use_login_shell */ true);
-        assert!(
-            is_known_safe_command(&login_args),
-            "expected {login_args:?} to be considered safe"
-        );
-
-        let non_login_args = shell.derive_exec_args(command, /* use_login_shell */ false);
-        assert!(
-            is_known_safe_command(&non_login_args),
-            "expected {non_login_args:?} to be considered safe"
-        );
+        assert!(is_known_safe_command(
+            &shell.derive_exec_args(command, /* use_login_shell */ true)
+        ));
+        assert!(is_known_safe_command(
+            &shell.derive_exec_args(command, /* use_login_shell */ false)
+        ));
     }
 
     #[tokio::test]
