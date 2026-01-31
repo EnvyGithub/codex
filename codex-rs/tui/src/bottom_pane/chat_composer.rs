@@ -3466,26 +3466,6 @@ mod tests {
         );
     }
 
-    fn sanitize_wsl_shortcuts(content: String) -> String {
-        // 归一化 WSL 环境下的快捷键显示: ctrl + ⌥ + v -> ctrl + v
-        // 保持行宽不变,用空格填充
-        content
-            .lines()
-            .map(|line| {
-                if line.contains("ctrl + ⌥ + v") {
-                    let original_chars = line.chars().count();
-                    let replaced = line.replace("ctrl + ⌥ + v", "ctrl + v");
-                    let replaced_chars = replaced.chars().count();
-                    let padding_needed = original_chars.saturating_sub(replaced_chars);
-                    format!("{}{}", replaced, " ".repeat(padding_needed))
-                } else {
-                    line.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
     fn snapshot_composer_state_with_width<F>(
         name: &str,
         width: u16,
@@ -3515,8 +3495,7 @@ mod tests {
         terminal
             .draw(|f| composer.render(f.area(), f.buffer_mut()))
             .unwrap();
-        let sanitized = sanitize_wsl_shortcuts(format!("{}", terminal.backend()));
-        insta::assert_snapshot!(name, sanitized);
+        insta::assert_snapshot!(name, terminal.backend());
     }
 
     fn snapshot_composer_state<F>(name: &str, enhanced_keys_supported: bool, setup: F)
