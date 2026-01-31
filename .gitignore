@@ -42,6 +42,9 @@ AGENTS.override.md
 .jest/
 *.tsbuildinfo
 
+# rust-analyzer cache (root level)
+/target/
+
 # logs
 *.log
 npm-debug.log*
