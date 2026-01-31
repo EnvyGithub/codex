@@ -114,7 +114,7 @@ pub enum TranslationError {
     EmptyTranslation,
 }
 
-fn preview_bytes(bytes: &[u8]) -> String {
+pub(crate) fn preview_bytes(bytes: &[u8]) -> String {
     const MAX_CHARS: usize = 300;
     let s = String::from_utf8_lossy(bytes);
     let trimmed = s.trim();
