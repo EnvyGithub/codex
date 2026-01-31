@@ -19,6 +19,7 @@ use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::openai_models::ReasoningEffort;
 use insta::assert_snapshot;
 use ratatui::prelude::*;
+use regex_lite::Regex;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -61,9 +62,23 @@ fn render_lines(lines: &[Line<'static>]) -> Vec<String> {
 }
 
 fn sanitize_directory(lines: Vec<String>) -> Vec<String> {
+    let version_regex = Regex::new(r"\(v\d+\.\d+\.\d+\)").unwrap();
     lines
         .into_iter()
         .map(|line| {
+            let mut line = line;
+            // 归一化版本号: (v0.93.0) -> (v0.93.0) 保持长度不变
+            if line.contains("(v") {
+                line = version_regex
+                    .replace_all(&line, |caps: &regex_lite::Captures| {
+                        let matched = caps.get(0).unwrap().as_str();
+                        let original_len = matched.len();
+                        let replacement = "(v0.0.0)";
+                        let padding = " ".repeat(original_len.saturating_sub(replacement.len()));
+                        format!("{replacement}{padding}")
+                    })
+                    .to_string();
+            }
             if let (Some(dir_pos), Some(pipe_idx)) = (line.find("Directory: "), line.rfind('│')) {
                 let prefix = &line[..dir_pos + "Directory: ".len()];
                 let suffix = &line[pipe_idx..];
