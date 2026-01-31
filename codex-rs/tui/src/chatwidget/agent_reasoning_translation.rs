@@ -57,6 +57,7 @@ impl AgentReasoningBodyTranslationResult {
 
 #[derive(Debug)]
 pub(crate) struct AgentReasoningTranslationOrchestrator {
+    enabled: bool,
     /// “主题标题原文 -> 主题标题译文”的缓存。
     ///
     /// 这里缓存来自“正文翻译结果”中提取的标题译文，用于实时 status header 显示双语标题。
@@ -85,9 +86,16 @@ pub(crate) struct OnBodyTranslatedResult {
 
 impl Default for AgentReasoningTranslationOrchestrator {
     fn default() -> Self {
+        Self::new(true)
+    }
+}
+
+impl AgentReasoningTranslationOrchestrator {
+    pub(crate) fn new(enabled: bool) -> Self {
         let (body_translation_results_tx, body_translation_results_rx) =
             tokio::sync::mpsc::unbounded_channel();
         Self {
+            enabled,
             title_translation_cache: HashMap::new(),
             current_reasoning_title_raw: None,
             body_translation_barrier: None,
@@ -96,12 +104,6 @@ impl Default for AgentReasoningTranslationOrchestrator {
             body_translation_results_tx,
             body_translation_results_rx,
         }
-    }
-}
-
-impl AgentReasoningTranslationOrchestrator {
-    pub(crate) fn on_task_started(&mut self) {
-        self.current_reasoning_title_raw = None;
     }
 
     pub(crate) fn maybe_status_header_from_reasoning_buffer(
@@ -127,6 +129,9 @@ impl AgentReasoningTranslationOrchestrator {
         full_reasoning: String,
         frame_requester: FrameRequester,
     ) {
+        if !self.enabled {
+            return;
+        }
         let Some(config) = config.cloned() else {
             return;
         };
@@ -192,6 +197,12 @@ impl AgentReasoningTranslationOrchestrator {
         app_event_tx: &AppEventSender,
         frame_requester: FrameRequester,
     ) -> OnBodyTranslatedResult {
+        if !self.enabled {
+            return OnBodyTranslatedResult {
+                status_header_update: None,
+                needs_redraw: false,
+            };
+        }
         let mut out = OnBodyTranslatedResult {
             status_header_update: None,
             needs_redraw: false,
@@ -327,6 +338,9 @@ impl AgentReasoningTranslationOrchestrator {
         app_event_tx: &AppEventSender,
         frame_requester: FrameRequester,
     ) -> bool {
+        if !self.enabled {
+            return false;
+        }
         let Some(barrier) = self.body_translation_barrier.as_ref() else {
             return false;
         };
@@ -361,6 +375,61 @@ impl AgentReasoningTranslationOrchestrator {
         } else {
             app_event_tx.send(AppEvent::InsertHistoryCell(cell));
         }
+    }
+
+    pub(crate) fn emit_history_cell_with_translation_hook(
+        &mut self,
+        app_event_tx: &AppEventSender,
+        config: Option<&AgentReasoningTranslationConfig>,
+        active_thread_id: Option<ThreadId>,
+        frame_requester: FrameRequester,
+        cell: Box<dyn HistoryCell>,
+    ) {
+        if self.body_translation_barrier.is_some() {
+            self.deferred_history_cells.push_back(cell);
+            return;
+        }
+
+        let maybe_reasoning_for_translation = cell
+            .as_any()
+            .downcast_ref::<history_cell::ReasoningSummaryCell>()
+            .and_then(history_cell::ReasoningSummaryCell::full_markdown_for_translation);
+
+        app_event_tx.send(AppEvent::InsertHistoryCell(cell));
+
+        if let Some(full_reasoning) = maybe_reasoning_for_translation {
+            self.maybe_translate_reasoning_body(
+                config,
+                active_thread_id,
+                full_reasoning,
+                frame_requester,
+            );
+        }
+    }
+
+    pub(crate) fn on_draw_tick(
+        &mut self,
+        active_thread_id: Option<ThreadId>,
+        config: Option<&AgentReasoningTranslationConfig>,
+        app_event_tx: &AppEventSender,
+        frame_requester: FrameRequester,
+    ) -> OnBodyTranslatedResult {
+        if !self.enabled {
+            return OnBodyTranslatedResult {
+                status_header_update: None,
+                needs_redraw: false,
+            };
+        }
+        let mut result = self.drain_body_translation_results(
+            active_thread_id,
+            config,
+            app_event_tx,
+            frame_requester.clone(),
+        );
+        if self.maybe_flush_timeout(config, active_thread_id, app_event_tx, frame_requester) {
+            result.needs_redraw = true;
+        }
+        result
     }
 
     fn flush_deferred_history_cells(

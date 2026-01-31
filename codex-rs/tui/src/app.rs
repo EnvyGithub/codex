@@ -1221,8 +1221,13 @@ impl App {
         event: TuiEvent,
     ) -> Result<AppRunControl> {
         if matches!(event, TuiEvent::Draw) {
-            self.chat_widget
-                .maybe_flush_agent_reasoning_body_translation_barrier_timeout();
+            let result = self.chat_widget.translation_draw_tick_result();
+            if let Some(status_header) = result.status_header_update {
+                self.chat_widget.set_status_header(status_header);
+            }
+            if result.needs_redraw {
+                self.chat_widget.request_redraw();
+            }
         }
         if self.overlay.is_some() {
             let _ = self.handle_backtrack_overlay_event(tui, event).await?;

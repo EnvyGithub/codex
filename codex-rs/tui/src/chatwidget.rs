@@ -521,7 +521,6 @@ pub(crate) struct ChatWidget {
     reasoning_buffer: String,
     // Accumulates full reasoning content for transcript-only recording
     full_reasoning_buffer: String,
-    // ===== 推理翻译（外部命令插件） =====
     agent_reasoning_translation: AgentReasoningTranslationOrchestrator,
     // Current status header shown in the status indicator.
     current_status_header: String,
@@ -789,7 +788,7 @@ impl ChatWidget {
 
     /// Convenience wrapper around [`Self::set_status`];
     /// updates the status indicator header and clears any existing details.
-    fn set_status_header(&mut self, header: String) {
+    pub(crate) fn set_status_header(&mut self, header: String) {
         self.set_status(header, None);
     }
 
@@ -997,8 +996,6 @@ impl ChatWidget {
             .maybe_status_header_from_reasoning_buffer(&self.reasoning_buffer)
         {
             self.set_status_header(header);
-        } else {
-            // Fallback while we don't yet have a bold header: leave existing header as-is.
         }
         self.request_redraw();
     }
@@ -1006,19 +1003,10 @@ impl ChatWidget {
     fn on_agent_reasoning_final(&mut self) {
         // At the end of a reasoning block, record transcript-only content.
         self.full_reasoning_buffer.push_str(&self.reasoning_buffer);
-
         if !self.full_reasoning_buffer.is_empty() {
-            let full_reasoning = self.full_reasoning_buffer.clone();
-            let cell = history_cell::new_reasoning_summary_block(full_reasoning.clone());
+            let cell =
+                history_cell::new_reasoning_summary_block(self.full_reasoning_buffer.clone());
             self.add_boxed_history(cell);
-
-            self.agent_reasoning_translation
-                .maybe_translate_reasoning_body(
-                    self.config.agent_reasoning_translation.as_ref(),
-                    self.thread_id,
-                    full_reasoning,
-                    self.frame_requester.clone(),
-                );
         }
         self.reasoning_buffer.clear();
         self.full_reasoning_buffer.clear();
@@ -1052,7 +1040,6 @@ impl ChatWidget {
         self.set_status_header(String::from("Working"));
         self.full_reasoning_buffer.clear();
         self.reasoning_buffer.clear();
-        self.agent_reasoning_translation.on_task_started();
         self.request_redraw();
     }
 
@@ -2272,6 +2259,9 @@ impl ChatWidget {
 
         let active_cell = Some(Self::placeholder_session_header_cell(&config));
 
+        let translation_enabled = config.agent_reasoning_translation.is_some();
+        #[rustfmt::skip]
+        let agent_reasoning_translation = AgentReasoningTranslationOrchestrator::new(translation_enabled);
         let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
@@ -2319,7 +2309,7 @@ impl ChatWidget {
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
-            agent_reasoning_translation: AgentReasoningTranslationOrchestrator::default(),
+            agent_reasoning_translation,
             current_status_header: String::from("Working"),
             retry_status_header: None,
             thread_id: None,
@@ -2419,6 +2409,9 @@ impl ChatWidget {
 
         let active_cell = Some(Self::placeholder_session_header_cell(&config));
 
+        let translation_enabled = config.agent_reasoning_translation.is_some();
+        let agent_reasoning_translation =
+            AgentReasoningTranslationOrchestrator::new(translation_enabled);
         let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
@@ -2466,7 +2459,7 @@ impl ChatWidget {
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
-            agent_reasoning_translation: AgentReasoningTranslationOrchestrator::default(),
+            agent_reasoning_translation,
             current_status_header: String::from("Working"),
             retry_status_header: None,
             thread_id: None,
@@ -2555,6 +2548,9 @@ impl ChatWidget {
             settings: fallback_default,
         };
 
+        let translation_enabled = config.agent_reasoning_translation.is_some();
+        let agent_reasoning_translation =
+            AgentReasoningTranslationOrchestrator::new(translation_enabled);
         let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
@@ -2602,7 +2598,7 @@ impl ChatWidget {
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
-            agent_reasoning_translation: AgentReasoningTranslationOrchestrator::default(),
+            agent_reasoning_translation,
             current_status_header: String::from("Working"),
             retry_status_header: None,
             thread_id: None,
@@ -3223,36 +3219,26 @@ impl ChatWidget {
         }
     }
 
-    pub(crate) fn maybe_flush_agent_reasoning_body_translation_barrier_timeout(&mut self) {
-        let result = self
-            .agent_reasoning_translation
-            .drain_body_translation_results(
-                self.thread_id,
-                self.config.agent_reasoning_translation.as_ref(),
-                &self.app_event_tx,
-                self.frame_requester.clone(),
-            );
-        if let Some(status_header) = result.status_header_update {
-            self.set_status_header(status_header);
-        }
-        if result.needs_redraw {
-            self.request_redraw();
-        }
-
-        let flushed = self.agent_reasoning_translation.maybe_flush_timeout(
-            self.config.agent_reasoning_translation.as_ref(),
+    pub(crate) fn translation_draw_tick_result(
+        &mut self,
+    ) -> agent_reasoning_translation::OnBodyTranslatedResult {
+        self.agent_reasoning_translation.on_draw_tick(
             self.thread_id,
+            self.config.agent_reasoning_translation.as_ref(),
             &self.app_event_tx,
             self.frame_requester.clone(),
-        );
-        if flushed {
-            self.request_redraw();
-        }
+        )
     }
 
     fn emit_history_cell(&mut self, cell: Box<dyn HistoryCell>) {
         self.agent_reasoning_translation
-            .emit_history_cell(&self.app_event_tx, cell);
+            .emit_history_cell_with_translation_hook(
+                &self.app_event_tx,
+                self.config.agent_reasoning_translation.as_ref(),
+                self.thread_id,
+                self.frame_requester.clone(),
+                cell,
+            );
     }
 
     fn flush_active_cell(&mut self) {
@@ -3735,7 +3721,7 @@ impl ChatWidget {
             .send(AppEvent::Exit(ExitMode::ShutdownFirst));
     }
 
-    fn request_redraw(&mut self) {
+    pub(crate) fn request_redraw(&mut self) {
         self.frame_requester.schedule_frame();
     }
 
