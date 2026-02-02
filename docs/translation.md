@@ -333,6 +333,11 @@ git remote set-url --push upstream DISABLED
 
 默认行为会对齐“上游最新稳定发布 tag（`rust-vX.Y.Z`）”，以减少跟随 `upstream/main` 带来的不确定性；如需跟随开发分支，可显式指定 `--upstream upstream/main`。
 
+补充说明（与“版本号/快照 churn”相关）：
+
+- 当 `--upstream` 是 `rust-v*` 这种发布 tag 且你启用了 `--build`/`--verify` 时，脚本会**临时**把 `codex-rs/Cargo.toml` 的 `workspace.package.version` 写成该 tag 的版本号，并备份/恢复 `codex-rs/Cargo.lock`，让本次编译产物的 `codex --version` 与 tag 对齐。
+- 脚本退出时会自动恢复这些文件，避免把“仅为构建服务的版本号变更”带进补丁栈（也避免下次 rebase 冲突）。
+
 交互式（推荐给人手动用）：
 
 ```bash
