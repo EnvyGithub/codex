@@ -2459,7 +2459,7 @@ impl ChatWidget {
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
-            agent_reasoning_translation: AgentReasoningTranslationOrchestrator::default(),
+            agent_reasoning_translation,
             current_status_header: String::from("Working"),
             retry_status_header: None,
             thread_id: None,
