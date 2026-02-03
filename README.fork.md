@@ -2,7 +2,7 @@
 
 本仓库基于上游 `openai/codex`，在官方 Codex CLI 的基础上新增了一个**可选**扩展：**推理输出翻译插件（外部命令钩子）**。
 
-该扩展的目标是：允许你用**自定义外部命令**（脚本/二进制均可）把 TUI / TUI2 中的 `AgentReasoning`（例如 `Thinking` / `Analyzing` 这类推理/思考块）翻译为中文，并以"原文 + 译文"形式展示。
+该扩展的目标是：允许你用**自定义外部命令**（脚本/二进制均可）把 TUI 中的 `AgentReasoning`（例如 `Thinking` / `Analyzing` 这类推理/思考块）翻译为中文，并以"原文 + 译文"形式展示。
 
 ## 效果预览
 
@@ -20,7 +20,7 @@
 - 目前主要在 **Windows 11 + WSL2** 环境开发/测试；其他环境尚未系统验证（欢迎反馈与 PR）。
 - 问题反馈：请优先在本仓库提 issue；若确认/怀疑为上游问题（`openai/codex`），请附上游 issue 链接（或你已检索的关键词与复现步骤），便于跟踪与同步修复。
 
-## 快速开始：启用"推理译文"（TUI/TUI2）
+## 快速开始：启用"推理译文"（TUI）
 
 ### 1) 安装/构建本 fork 的 `codex`
 
@@ -58,7 +58,7 @@ cargo run --bin codex -- "explain this codebase to me"
 在你的 `~/.codex/config.toml` 中加入（示例）：
 
 ```toml
-[translation.agent_reasoning]
+[plugins.translation.agent_reasoning]
 command = ["python3", "/path/to/translate_agent_reasoning_dummy.py"]
 timeout_ms = 2000
 ui_max_wait_ms = 5000
@@ -69,6 +69,8 @@ ui_max_wait_ms = 5000
 - `ui_max_wait_ms`：UI 对齐等待上限（毫秒），用于尽量保证"译文紧跟原文"
 
 详细配置说明与协议定义见：[docs/translation.md](docs/translation.md)
+
+> 兼容说明：旧路径 `[translation.agent_reasoning]` 仍可用，但已弃用，建议尽快迁移到 `[plugins.translation.agent_reasoning]`。
 
 ## 编写你自己的翻译器（外部命令插件）
 
