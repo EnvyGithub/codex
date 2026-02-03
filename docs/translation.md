@@ -236,8 +236,14 @@ CODEX_GEMINI_MAX_OUTPUT_TOKENS=4096
 - `CODEX_TRANSLATION_BASE_URL`（可选，默认使用 `$OPENAI_BASE_URL` 或 `https://api.openai.com/v1`）
 - `CODEX_TRANSLATION_API_KEY`（或直接复用 `$OPENAI_API_KEY`）
 - `CODEX_TRANSLATION_MODEL`（默认 `gpt-4.1-mini`，按你账号可用模型自行替换）
+- `CODEX_TRANSLATION_RETRY_ATTEMPTS`（可选，默认 `1`）：额外重试次数（不含首次请求）。仅对 429/5xx/网络错误重试。
+- `CODEX_TRANSLATION_RETRY_BASE_SLEEP_MS`（可选，默认 `200`）：指数退避基础等待（毫秒）。
+- `CODEX_TRANSLATION_RETRY_MAX_SLEEP_MS`（可选，默认 `1000`）：单次等待上限（毫秒）；也用于限制 `Retry-After`（避免长等待拖慢 UI）。
+- `CODEX_TRANSLATION_HTTP_TIMEOUT_SECONDS`（可选，默认 `30`）：单次 HTTP 请求超时（秒）。
 
-建议把 `timeout_ms` 设得稍大一些（例如 8000ms），避免网络抖动导致频繁超时。
+Codex 默认 `timeout_ms` 为 2000ms（偏保守，适合离线/快速失败）。如果你使用在线翻译，
+建议把 `timeout_ms` 设得更大（例如 8000ms 或更高），避免网络抖动导致频繁超时。
+如果你看到 `translation_failed:http_429:...`，通常表示触发了上游限流/配额；可尝试进一步调大 `timeout_ms` 并提高重试次数。
 
 ## 示例翻译器（Gemini 在线）
 
