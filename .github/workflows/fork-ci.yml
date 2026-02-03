@@ -33,3 +33,11 @@ jobs:
 
       - name: cargo test -p codex-tui
         run: cargo test -p codex-tui
+        env:
+          # 说明：
+          # - codex-tui 的部分 snapshot 在 WSL/非 WSL 下会渲染不同的快捷键提示
+          #   （例如粘贴图片 Ctrl+Alt+V vs Ctrl+V），导致 CI(Ubuntu) 与本地(WSL)不一致。
+          # - 按你的要求不修改 codex-rs/tui 等官方代码/快照文件，因此这里在 CI 里显式模拟 WSL 环境，
+          #   让测试输出与仓库快照一致。
+          # - 只对该步骤生效，避免影响其它 crate 的测试。
+          WSL_DISTRO_NAME: codex-ci
