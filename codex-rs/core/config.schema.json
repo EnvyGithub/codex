@@ -714,6 +714,7 @@
     },
     "Personality": {
       "enum": [
+        "none",
         "friendly",
         "pragmatic"
       ],
