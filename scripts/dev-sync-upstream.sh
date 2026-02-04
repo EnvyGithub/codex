@@ -55,7 +55,7 @@ usage() {
       --no-rebase              跳过 rebase（默认会 rebase）
       --branch <name>          切换到指定分支后再执行（默认当前分支）
       --upstream <ref>         上游基准 ref（默认 latest-stable，即最新 rust 稳定 tag）
-      --patch-base <ref>       补丁基线 ref（默认通过 marker 文件自动检测；若历史变更/文件迁移请手动指定）
+      --patch-base <ref>       补丁基线 ref（默认优先用当前分支已包含的最新稳定 rust tag；否则用 marker 启发式；若历史变更/文件迁移请手动指定）
       --push                   rebase 成功后推送到 origin（使用 --force-with-lease）
       --build <mode>           编译模式：none|debug|release|both
       --link <mode>            建立符号链接：none|debug|release|both
@@ -136,16 +136,46 @@ latest_stable_rust_tag() {
   echo "$tag"
 }
 
+latest_stable_rust_tag_merged_into_head() {
+  # 选择当前 HEAD 已经包含的最新“稳定发布”tag（strict rust-vX.Y.Z）。
+  #
+  # 当你的分支始终是“基于某个 rust-v* tag + 仅叠加 fork 提交（补丁栈）”时，
+  # 这个 tag 基本等价于“当前补丁栈的基线”。用它作为 patch-base 可以避免重放
+  # 上游在 tag 之间的提交（其中经常包含 Cargo.lock churn），从而显著减少 rebase 冲突。
+  local tag
+  tag="$(
+    git -C "$REPO_ROOT" tag --merged HEAD --list 'rust-v*' --sort=-v:refname \
+      | while read -r candidate; do
+          if [[ "$candidate" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$candidate"
+            break
+          fi
+        done
+  )"
+
+  if [[ -z "$tag" ]]; then
+    return 1
+  fi
+  echo "$tag"
+}
+
 auto_patch_base() {
   # 自动推断“补丁基线”（即：本 fork 的自定义提交栈从哪里开始）。
   #
   # 约定：
-  # - 本 fork 的核心扩展（推理译文插件）会引入 `codex-rs/core/src/translation/external_command.rs`
-  # - 我们把“首次引入该文件的提交”的父提交作为补丁基线
+  # - 若当前分支已经基于某个上游稳定 tag（rust-vX.Y.Z）并仅叠加 fork 提交：
+  #   优先把“当前 HEAD 已经包含的最新稳定 tag”作为补丁基线。
+  # - 否则（例如跟随 upstream/main 或历史不含 tag）：回退到 marker 文件启发式。
   #
   # 这样做的目的：
-  # - 避免仅凭 upstream/main 的 hash 做范围计算（本仓库历史中存在同一上游变更但 hash 不同的情况）
-  # - 确保“重新打补丁”只搬运本 fork 自己的改动，而不是把上游的开发提交一并重放到发布 tag 上
+  # - 减少 lockfile/依赖更新带来的 rebase 冲突
+  # - 确保“重新打补丁”尽可能只搬运本 fork 自己的改动
+  local stable_tag
+  if stable_tag="$(latest_stable_rust_tag_merged_into_head)"; then
+    echo "$stable_tag"
+    return 0
+  fi
+
   local marker_file="codex-rs/core/src/translation/external_command.rs"
   local first_commit
   first_commit="$(git -C "$REPO_ROOT" log --reverse --format=%H -- "$marker_file" | head -n 1 || true)"
@@ -577,6 +607,7 @@ info "模式：fetch=${DO_FETCH} rebase=${DO_REBASE} push=${DO_PUSH} build=${BUI
 
 if [[ "$DO_REBASE" -eq 1 ]]; then
   info "重新打补丁：把 ${PATCH_BASE_SHORT} 之后的本地提交栈应用到 ${UPSTREAM_REF}..."
+  SKIP_REBASE=0
   if [[ "${DRY_RUN}" -ne 1 ]]; then
     if ! run_git rev-parse --verify "${PATCH_BASE}^{commit}" >/dev/null 2>&1; then
       die "补丁基线 ref 不存在或不可解析：${PATCH_BASE}（请确认 remote upstream 存在且已 fetch）"
@@ -584,8 +615,16 @@ if [[ "$DO_REBASE" -eq 1 ]]; then
     if ! run_git rev-parse --verify "${UPSTREAM_REF}^{commit}" >/dev/null 2>&1; then
       die "上游 ref 不存在或不可解析：${UPSTREAM_REF}（如果是 tag，请确保已 fetch tags；脚本默认会 fetch --tags）"
     fi
+
+    # 若补丁基线与目标基线一致，rebase 将无意义地重放补丁栈并改写提交 hash。
+    if [[ "$(git -C "$REPO_ROOT" rev-parse "${PATCH_BASE}^{commit}")" == "$(git -C "$REPO_ROOT" rev-parse "${UPSTREAM_REF}^{commit}")" ]]; then
+      info "补丁基线与目标基线相同（${UPSTREAM_REF}），跳过 rebase。"
+      SKIP_REBASE=1
+    fi
   fi
-  if [[ "$ALLOW_DIRTY" -eq 1 ]]; then
+  if [[ "$SKIP_REBASE" -eq 1 ]]; then
+    :
+  elif [[ "$ALLOW_DIRTY" -eq 1 ]]; then
     if ! run_git rebase --autostash --onto "$UPSTREAM_REF" "$PATCH_BASE"; then
       die "rebase 失败（已启用 --autostash）。请根据 git 输出解决冲突后执行 git rebase --continue，或执行 git rebase --abort 放弃本次 rebase。"
     fi

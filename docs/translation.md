@@ -345,6 +345,8 @@ git remote set-url --push upstream DISABLED
 
 - 当 `--upstream` 是 `rust-v*` 这种发布 tag 且你启用了 `--build`/`--verify` 时，脚本会**临时**把 `codex-rs/Cargo.toml` 的 `workspace.package.version` 写成该 tag 的版本号，并备份/恢复 `codex-rs/Cargo.lock`，让本次编译产物的 `codex --version` 与 tag 对齐。
 - 脚本退出时会自动恢复这些文件，避免把“仅为构建服务的版本号变更”带进补丁栈（也避免下次 rebase 冲突）。
+- 补丁基线（`--patch-base`）若未显式指定，脚本会优先选择“当前分支已经包含的最新稳定 rust tag（严格 `rust-vX.Y.Z`）”作为基线。
+  这符合“基于某个稳定 tag + 仅叠加 fork 补丁栈”的维护方式：rebase 到新 tag 时只重放 fork 提交，避免把上游在 tag 之间的提交（经常包含 `Cargo.lock` 变更）也重放一遍，从而显著减少 lockfile 冲突。
 
 交互式（推荐给人手动用）：
 
