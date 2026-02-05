@@ -6,6 +6,7 @@ set -euo pipefail
 # - 如需跟随上游开发分支，可显式指定：--upstream upstream/main
 # - 可选：编译 codex-rs 的 codex 二进制（debug/release）。
 # - 可选：创建/更新本地符号链接（例如 ~/.local/bin/codex-dev），方便直接运行你编译的版本。
+# - 可选：清理 codex-rs/target（只保留二进制可执行文件），防止磁盘占用过大。
 #
 # 设计原则：
 # - 失败即失败：不吞异常、不悄悄回退默认值；所有关键行为都可见可控。
@@ -22,7 +23,7 @@ usage() {
 默认行为（交互模式）：
   1) git fetch upstream --prune --tags
   2) git rebase --onto <latest stable rust tag> <patch-base>
-  3) 可选：push / build / link / verify（交互询问）
+  3) 可选：push / build / link / verify / prune-target（交互询问）
   4) 若基线为 rust-v* tag 且你启用了 build/verify：脚本会临时把 codex-rs/Cargo.toml 的
      workspace.package.version 写成该 tag 的版本号，并备份/恢复 codex-rs/Cargo.lock，
      确保本次编译产物的 `codex --version` 对齐该 tag；脚本退出会自动恢复，避免把版本号改动带进补丁栈。
@@ -32,7 +33,7 @@ usage() {
   ./scripts/dev-sync-upstream.sh
 
   # 非交互（适合自动化/AI）：对齐最新稳定 tag + 编译 release + 建 release 链接
-  ./scripts/dev-sync-upstream.sh --non-interactive --build release --link release
+  ./scripts/dev-sync-upstream.sh --non-interactive --build release --link release --prune-target keep-executables
 
   # 非交互：对齐最新稳定 tag + 推送（rebase 后需要 force-with-lease）+ 快速验证
   ./scripts/dev-sync-upstream.sh --non-interactive --push --verify quick
@@ -42,7 +43,7 @@ usage() {
 
   # 显式对齐到某个“发布 tag”（推荐：对外公开仓库/对齐上游 release 时使用）
   # 说明：上游会为 Rust CLI 的发布打 tag，例如 rust-v0.87.0 / rust-v0.88.0-alpha.1（预发布）
-  ./scripts/dev-sync-upstream.sh --non-interactive --upstream rust-v0.87.0 --build both --link both --verify quick
+  ./scripts/dev-sync-upstream.sh --non-interactive --upstream rust-v0.87.0 --build both --link both --verify quick --prune-target keep-executables
 
   # 跟随上游开发分支（会得到 0.0.0 这类开发版本号属正常现象）
   ./scripts/dev-sync-upstream.sh --non-interactive --upstream upstream/main --build release
@@ -61,6 +62,9 @@ usage() {
       --link <mode>            建立符号链接：none|debug|release|both
       --link-dir <path>        符号链接目录（默认 ~/.local/bin）
       --verify <mode>          验证：none|quick
+      --prune-target <mode>    清理 codex-rs/target：none|keep-executables|keep-codex
+                               - keep-executables：仅保留目标 profile 顶层可执行文件（推荐：避免磁盘爆炸）
+                               - keep-codex：仅保留目标 profile 的 codex 可执行文件（更省空间，但更激进）
   -h, --help                   显示帮助
 
 返回码：
@@ -392,6 +396,7 @@ PATCH_BASE_REF=""
 BUILD_MODE=""
 LINK_MODE=""
 VERIFY_MODE=""
+PRUNE_TARGET_MODE=""
 LINK_DIR="${HOME}/.local/bin"
 
 while [[ $# -gt 0 ]]; do
@@ -463,6 +468,11 @@ while [[ $# -gt 0 ]]; do
     --verify)
       require_arg "--verify" "${2:-}"
       VERIFY_MODE="$2"
+      shift 2
+      ;;
+    --prune-target)
+      require_arg "--prune-target" "${2:-}"
+      PRUNE_TARGET_MODE="$2"
       shift 2
       ;;
     *)
@@ -554,6 +564,23 @@ else
 fi
 require_enum "--verify" "$VERIFY_MODE" none quick
 
+if [[ -z "${PRUNE_TARGET_MODE}" ]]; then
+  if [[ "$INTERACTIVE" -eq 1 ]]; then
+    if [[ "$BUILD_MODE" == "none" && "$LINK_MODE" == "none" ]]; then
+      # 既不编译也不建链接时，“保留哪个 profile”无法推断；默认不清理，避免误删用户已有产物。
+      PRUNE_TARGET_MODE="none"
+    else
+      PRUNE_TARGET_MODE="$(prompt_enum "是否在结束时清理 codex-rs/target（只保留二进制，防止占用过大）" "keep-executables" none keep-executables keep-codex)"
+    fi
+  else
+    PRUNE_TARGET_MODE="none"
+  fi
+else
+  PRUNE_TARGET_MODE="$(trim "$PRUNE_TARGET_MODE")"
+  PRUNE_TARGET_MODE="${PRUNE_TARGET_MODE,,}"
+fi
+require_enum "--prune-target" "$PRUNE_TARGET_MODE" none keep-executables keep-codex
+
 if [[ "$PUSH_EXPLICIT" -ne 1 && "$INTERACTIVE" -eq 1 ]]; then
   if prompt_yes_no "是否在 rebase 成功后推送到 origin？（将使用 --force-with-lease）" "n"; then
     DO_PUSH=1
@@ -603,7 +630,7 @@ if [[ -n "$UPSTREAM_VERSION" ]]; then
 else
   info "目标基线：${UPSTREAM_REF}"
 fi
-info "模式：fetch=${DO_FETCH} rebase=${DO_REBASE} push=${DO_PUSH} build=${BUILD_MODE} link=${LINK_MODE} verify=${VERIFY_MODE} dry-run=${DRY_RUN}"
+info "模式：fetch=${DO_FETCH} rebase=${DO_REBASE} push=${DO_PUSH} build=${BUILD_MODE} link=${LINK_MODE} verify=${VERIFY_MODE} prune-target=${PRUNE_TARGET_MODE} dry-run=${DRY_RUN}"
 
 if [[ "$DO_REBASE" -eq 1 ]]; then
   info "重新打补丁：把 ${PATCH_BASE_SHORT} 之后的本地提交栈应用到 ${UPSTREAM_REF}..."
@@ -806,5 +833,159 @@ case "$VERIFY_MODE" in
   none) ;;
   quick) verify_quick ;;
 esac
+
+prune_target_keep_executables() {
+  local target_dir="${CODEX_RS_DIR}/target"
+  local -a profiles_to_keep=("$@")
+
+  if [[ ! -d "$target_dir" ]]; then
+    info "未发现 ${target_dir}，无需清理。"
+    return 0
+  fi
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    info "dry-run：将清理 ${target_dir}，仅保留 profile=${profiles_to_keep[*]} 顶层可执行文件。"
+    return 0
+  fi
+
+  local backup_dir
+  backup_dir="$(mktemp -d)"
+  run_cmd mkdir -p "${backup_dir}/debug" "${backup_dir}/release"
+
+  local profile
+  for profile in "${profiles_to_keep[@]}"; do
+    local profile_dir="${target_dir}/${profile}"
+    if [[ ! -d "$profile_dir" ]]; then
+      run_cmd rm -rf "$backup_dir"
+      die "找不到目录：${profile_dir}（请先 --build 对应模式，或关闭 --prune-target）"
+    fi
+
+    local -a kept_names=()
+    while IFS= read -r -d '' exe; do
+      kept_names+=("$(basename "$exe")")
+      run_cmd cp -a "$exe" "${backup_dir}/${profile}/"
+    done < <(find "$profile_dir" -maxdepth 1 \( -type f -o -type l \) -executable -print0)
+
+    if [[ "${#kept_names[@]}" -eq 0 ]]; then
+      run_cmd rm -rf "$backup_dir"
+      die "在 ${profile_dir} 未找到任何顶层可执行文件，无法执行 --prune-target keep-executables"
+    fi
+
+    info "将保留（${profile}）：${kept_names[*]}"
+  done
+
+  info "清理前 target 大小："
+  run_cmd du -sh "$target_dir"
+  info "清理编译产物：删除 ${target_dir} 并仅恢复可执行文件..."
+  run_cmd rm -rf "$target_dir"
+
+  local restore_profile
+  for restore_profile in "${profiles_to_keep[@]}"; do
+    run_cmd mkdir -p "${target_dir}/${restore_profile}"
+    shopt -s nullglob
+    local file
+    for file in "${backup_dir}/${restore_profile}/"*; do
+      run_cmd cp -a "$file" "${target_dir}/${restore_profile}/"
+    done
+    shopt -u nullglob
+  done
+
+  run_cmd rm -rf "$backup_dir"
+  info "target 清理完成：${target_dir}"
+  run_cmd du -sh "$target_dir"
+}
+
+prune_target_keep_codex() {
+  local target_dir="${CODEX_RS_DIR}/target"
+  local -a profiles_to_keep=("$@")
+
+  if [[ ! -d "$target_dir" ]]; then
+    info "未发现 ${target_dir}，无需清理。"
+    return 0
+  fi
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    info "dry-run：将清理 ${target_dir}，仅保留 profile=${profiles_to_keep[*]} 的 codex 可执行文件。"
+    return 0
+  fi
+
+  local backup_dir
+  backup_dir="$(mktemp -d)"
+
+  local profile
+  for profile in "${profiles_to_keep[@]}"; do
+    local codex_path="${target_dir}/${profile}/codex"
+    if [[ ! -x "$codex_path" ]]; then
+      run_cmd rm -rf "$backup_dir"
+      die "找不到可执行文件：${codex_path}（请先 --build 对应模式，或使用 --prune-target keep-executables）"
+    fi
+    run_cmd mkdir -p "${backup_dir}/${profile}"
+    run_cmd cp -a "$codex_path" "${backup_dir}/${profile}/"
+    info "将保留（${profile}）：codex"
+  done
+
+  info "清理前 target 大小："
+  run_cmd du -sh "$target_dir"
+  info "清理编译产物：删除 ${target_dir} 并仅恢复 codex..."
+  run_cmd rm -rf "$target_dir"
+
+  local restore_profile
+  for restore_profile in "${profiles_to_keep[@]}"; do
+    run_cmd mkdir -p "${target_dir}/${restore_profile}"
+    run_cmd cp -a "${backup_dir}/${restore_profile}/codex" "${target_dir}/${restore_profile}/codex"
+  done
+
+  run_cmd rm -rf "$backup_dir"
+  info "target 清理完成：${target_dir}"
+  run_cmd du -sh "$target_dir"
+}
+
+maybe_prune_target() {
+  if [[ "$PRUNE_TARGET_MODE" == "none" ]]; then
+    return 0
+  fi
+
+  local want_debug=0
+  local want_release=0
+
+  case "$BUILD_MODE" in
+    debug|both) want_debug=1 ;;
+  esac
+  case "$BUILD_MODE" in
+    release|both) want_release=1 ;;
+  esac
+  case "$LINK_MODE" in
+    debug|both) want_debug=1 ;;
+  esac
+  case "$LINK_MODE" in
+    release|both) want_release=1 ;;
+  esac
+
+  local -a profiles_to_keep=()
+  if [[ "$want_debug" -eq 1 ]]; then
+    profiles_to_keep+=("debug")
+  fi
+  if [[ "$want_release" -eq 1 ]]; then
+    profiles_to_keep+=("release")
+  fi
+
+  if [[ "${#profiles_to_keep[@]}" -eq 0 ]]; then
+    die "--prune-target ${PRUNE_TARGET_MODE} 需要配合 --build/--link 指定要保留的 profile（例如：--build release）"
+  fi
+
+  case "$PRUNE_TARGET_MODE" in
+    keep-executables) prune_target_keep_executables "${profiles_to_keep[@]}" ;;
+    keep-codex) prune_target_keep_codex "${profiles_to_keep[@]}" ;;
+    *) die "内部错误：未知 PRUNE_TARGET_MODE=${PRUNE_TARGET_MODE}" ;;
+  esac
+}
+
+maybe_prune_target
+
+if [[ "$PRUNE_TARGET_MODE" == "none" && -d "${CODEX_RS_DIR}/target" ]]; then
+  if [[ "$BUILD_MODE" != "none" || "$LINK_MODE" != "none" || "$VERIFY_MODE" != "none" ]]; then
+    info "提示：本次未清理 codex-rs/target（编译缓存可能增长很快）。如只需要二进制产物，建议下次加：--prune-target keep-executables（或 keep-codex）。"
+  fi
+fi
 
 info "完成。"
