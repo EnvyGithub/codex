@@ -1,5 +1,47 @@
 # Codex CLI（Fork：推理输出翻译插件）
 
+> **Downstream work / attribution**
+>
+> This repository is a fork of [openai/codex](https://github.com/openai/codex).
+> The upstream Codex project and its original code are authored by OpenAI and
+> upstream contributors. The custom work maintained in this fork is documented
+> in this file and in downstream commits; it should not be confused with upstream
+> Codex features.
+
+## What I changed in this fork
+
+The main downstream feature is an optional **AgentReasoning translation plugin**
+implemented as an external-command hook. The design goal is to keep the core CLI
+decoupled from any specific translation vendor while allowing local, private, or
+OpenAI-compatible translators to be plugged in.
+
+The downstream work includes:
+
+- configuration under `[plugins.translation.agent_reasoning]`;
+- a stdin/stdout JSON protocol for external translator processes;
+- TUI integration for displaying original reasoning output together with the
+  translated text;
+- timeout and UI wait controls so a slow translator does not indefinitely block
+  the interface;
+- example translators for local/dummy, OpenAI-compatible, and Gemini-style
+  integrations;
+- documentation for privacy, WSL/terminal behavior, and maintaining the fork
+  against upstream releases.
+
+For attribution, review the downstream commit history rather than treating the
+upstream repository history as my work.
+
+## Engineering / research context
+
+I maintain this fork as part of my C++/systems and developer-tooling work. My
+broader interests include low-level debugging, reverse engineering, Windows
+internals, virtualization, and building tooling that can be inspected and run in
+controlled environments.
+
+For security-related work, I use tooling only on systems and software that I own
+or am authorized to analyze.
+
+
 本仓库基于上游 `openai/codex`，在官方 Codex CLI 的基础上新增了一个**可选**扩展：**推理输出翻译插件（外部命令钩子）**。
 
 该扩展的目标是：允许你用**自定义外部命令**（脚本/二进制均可）把 TUI 中的 `AgentReasoning`（例如 `Thinking` / `Analyzing` 这类推理/思考块）翻译为中文，并以"原文 + 译文"形式展示。
